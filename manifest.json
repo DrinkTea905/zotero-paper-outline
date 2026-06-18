@@ -1,0 +1,19 @@
+{
+  "manifest_version": 2,
+  "name": "Paper Outline",
+  "version": "1.1.0",
+  "description": "用 AI 为论文自动生成带页码的层级目录与逐节摘要，显示在阅读器大纲栏、点击跳转。支持 DeepSeek/OpenAI/Kimi/智谱/通义/SiliconFlow/Ollama 等服务商。",
+  "homepage_url": "https://github.com/DrinkTea905/zotero-paper-outline",
+  "icons": {
+    "48": "icons/icon.png",
+    "96": "icons/icon.png"
+  },
+  "applications": {
+    "zotero": {
+      "id": "paper-outline@example.com",
+      "update_url": "https://raw.githubusercontent.com/DrinkTea905/zotero-paper-outline/main/update.json",
+      "strict_min_version": "7.0",
+      "strict_max_version": "10.*"
+    }
+  }
+}

@@ -1,0 +1,12 @@
+# 构建产物（由 build_xpi.py / 打包.ps1 生成，不入源码库；发布时作为 Release 附件）
+*.xpi
+
+# Python 缓存
+__pycache__/
+*.pyc
+
+# 编辑器 / 系统
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
