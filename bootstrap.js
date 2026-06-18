@@ -34,6 +34,8 @@ async function startup({ id, version, rootURI }) {
   PaperOutline.registerMenu();
   // 注入阅读器左侧「大纲」栏（DOM 注入 reader iframe）
   PaperOutline.registerReaderOutline();
+  // 入库自动处理：监听条目新增 → 自动生成总结/目录（默认开，可在设置里关）
+  PaperOutline.registerAutoObserver();
   PaperOutline.log("started v" + version);
 }
 
@@ -53,6 +55,7 @@ function onMainWindowUnload({ window }) {
 function shutdown() {
   if (typeof PaperOutline !== "undefined") {
     PaperOutline.unregisterMenu();
+    PaperOutline.unregisterAutoObserver();
     // eslint-disable-next-line no-global-assign
     PaperOutline = undefined;
   }

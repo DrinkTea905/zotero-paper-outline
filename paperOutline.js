@@ -52,6 +52,23 @@ var PaperOutline = {
     "level 表示层级（1 为一级标题，2 为二级，以此类推）。" +
     "若原文章节标题是英文，title 请翻译成中文。不要输出 JSON 以外的任何文字。",
 
+  // 整篇总结提示词（默认；设置里可改，清空回落到此）。AI 用 Markdown 输出，写入笔记时转 HTML。
+  SUMMARY_PROMPT:
+    "请总结这篇学术论文的核心内容（你的输出必须是简体中文）。直接输出总结正文，" +
+    "不要任何开场白或客套话（例如「好的」「以下是……的总结」等），也不要复述论文标题。要求：\n" +
+    "1. 全文控制在 1000 字以内；\n" +
+    "2. 先点明论文的核心研究问题、研究对象与全文核心观点；\n" +
+    "3. 按论文行文逻辑分模块梳理，覆盖研究背景、制度沿革、核心论证、史料依据、结论与现实启示；\n" +
+    "4. 保留关键数据、典型案例、核心制度规则与重要学术观点；\n" +
+    "5. 使用分级标题+要点的结构化排版，逻辑清晰，重点信息加粗标注；\n" +
+    "6. 抓主干、不遗漏核心结论；宁可凝练也不要超过 1000 字。",
+
+  // 总结喂给 AI 的全文字符上限（详细全文总结，需尽量覆盖全文；超长才首尾截断）
+  SUMMARY_MAX_CHARS: 60000,
+
+  // 子笔记里的整篇总结标记（用于去重判断：同一文献已有总结笔记则自动模式跳过）
+  SUMMARY_MARKER: "由 Paper Outline 生成 · 整篇总结",
+
   // 页码增强：当把带「===== 第 N 页 =====」标记的全文喂给 AI 时附加，让它标出每节起始页
   PAGE_INSTRUCTION:
     "【页码要求】正文中我用「===== 第 N 页 =====」标出了每页起始。" +
@@ -62,7 +79,8 @@ var PaperOutline = {
   // ── 菜单注册 ────────────────────────────────────────────
   // Zotero 8/9：用 Zotero.MenuManager.registerMenu（自动管理所有窗口）
   // Zotero 7：退化为逐窗口注入 #zotero-itemmenu
-  MENU_LABEL: "🧾 AI 总结并生成目录",
+  MENU_LABEL: "📑 AI 生成目录",
+  SUMMARY_MENU_LABEL: "📝 AI 整篇总结 → 笔记",
   _menuID: "paper-outline-menu",
   _usedMenuManager: false,
 
@@ -76,8 +94,20 @@ var PaperOutline = {
           menus: [
             {
               menuType: "menuitem",
-              label: this.MENU_LABEL,
+              label: this.SUMMARY_MENU_LABEL,
               // Zotero 8/9：label 属性不渲染，需在 onShowing 里给 DOM 元素设 label
+              onShowing: (event, context) => {
+                try {
+                  if (context && context.menuElem) {
+                    context.menuElem.setAttribute("label", PaperOutline.SUMMARY_MENU_LABEL);
+                  }
+                } catch (e) {}
+              },
+              onCommand: () => this.runSummaryOnSelected(),
+            },
+            {
+              menuType: "menuitem",
+              label: this.MENU_LABEL,
               onShowing: (event, context) => {
                 try {
                   if (context && context.menuElem) {
@@ -120,6 +150,11 @@ var PaperOutline = {
       if (doc.getElementById("paper-outline-menuitem")) return;
       const itemMenu = doc.getElementById("zotero-itemmenu");
       if (!itemMenu) return;
+      const ms = doc.createXULElement("menuitem");
+      ms.id = "paper-outline-summary-menuitem";
+      ms.setAttribute("label", this.SUMMARY_MENU_LABEL);
+      ms.addEventListener("command", () => this.runSummaryOnSelected());
+      itemMenu.appendChild(ms);
       const mi = doc.createXULElement("menuitem");
       mi.id = "paper-outline-menuitem";
       mi.setAttribute("label", this.MENU_LABEL);
@@ -134,6 +169,7 @@ var PaperOutline = {
   removeFromWindow(window) {
     try {
       window.document.getElementById("paper-outline-menuitem")?.remove();
+      window.document.getElementById("paper-outline-summary-menuitem")?.remove();
       this._addedWindows.delete(window);
     } catch (e) {
       this.log("removeFromWindow error: " + e);
@@ -1064,7 +1100,9 @@ var PaperOutline = {
   },
 
   // ── AI 调用：所有服务商统一走 OpenAI 兼容 /chat/completions ───────────────
-  async callAI(systemPrompt, userPrompt) {
+  // opts.json：是否要求 JSON 输出（目录=true；整篇总结=false，要纯文本）。不传则按服务商预设。
+  async callAI(systemPrompt, userPrompt, opts) {
+    opts = opts || {};
     const { url, model, key, json } = this._resolveAI();
     if (!url) throw new Error("未配置 API URL（自定义服务商需在设置里填写）");
     const headers = {};
@@ -1078,7 +1116,8 @@ var PaperOutline = {
       ],
       temperature: 0.2,
     };
-    if (json) payload.response_format = { type: "json_object" }; // 多数服务商支持；不支持的预设里关掉
+    const useJson = opts.json !== undefined ? opts.json : json;
+    if (useJson) payload.response_format = { type: "json_object" }; // 多数服务商支持；不支持的预设里关掉
     const j = await this._post(url, headers, payload);
     return (
       (j.choices && j.choices[0] && j.choices[0].message && j.choices[0].message.content) ||
@@ -1186,5 +1225,415 @@ var PaperOutline = {
     const n = Math.max(1, Math.min(limit, items.length));
     await Promise.all(Array.from({ length: n }, worker));
     return results;
+  },
+
+  // 延时（Zotero 的 bluebird Promise.delay；退化到 setTimeout）
+  _sleep(ms) {
+    try {
+      return Zotero.Promise.delay(ms);
+    } catch (e) {
+      return new Promise((r) => {
+        try {
+          Zotero.getMainWindow().setTimeout(r, ms);
+        } catch (e2) {
+          setTimeout(r, ms);
+        }
+      });
+    }
+  },
+
+  // ════════════════════════════════════════════════════════════════
+  //  整篇总结（新功能）：通读全文 → 一段概括性中文总结 → 存为子笔记
+  // ════════════════════════════════════════════════════════════════
+
+  // 取该条目最合适的 PDF（不弹选择框，供自动/总结用；多 PDF 取第一个）
+  async _bestPdf(item) {
+    const pdfs = this._pdfAttachments(item);
+    if (pdfs.length) return pdfs[0];
+    try {
+      const a = await item.getBestAttachment();
+      if (a && a.isPDFAttachment && a.isPDFAttachment()) return a;
+    } catch (e) {}
+    return null;
+  },
+
+  // 取附件全文：优先 PDFWorker（CID-aware，知网/扫描双层也能读），退化 attachmentText
+  async _getFullTextForItem(att) {
+    if (!att) return "";
+    try {
+      const pages = await this._getWorkerPages(att);
+      if (pages && pages.length) {
+        const t = pages.join("\n");
+        if (t.trim()) return t;
+      }
+    } catch (e) {}
+    try {
+      const t = (await att.attachmentText) || "";
+      if (t.trim()) return t;
+    } catch (e) {}
+    return "";
+  },
+
+  // 总结只需代表性内容：超长则取首段(70%)+尾段(30%)，覆盖引言与结论
+  _textForSummary(fullText, maxChars) {
+    const t = String(fullText || "");
+    if (t.length <= maxChars) return t;
+    const head = Math.floor(maxChars * 0.7);
+    const tail = maxChars - head;
+    return t.slice(0, head) + "\n\n……（中略）……\n\n" + t.slice(t.length - tail);
+  },
+
+  // 生成整篇总结文本（opts.fullText 已有则复用，避免重复抽取；opts.att 指定 PDF）
+  async generateSummary(item, onText, opts) {
+    opts = opts || {};
+    let full = opts.fullText;
+    if (!full) {
+      const att = opts.att || (await this._bestPdf(item));
+      if (!att || !att.isPDFAttachment()) throw new Error("没有可用的 PDF 附件");
+      if (onText) onText("取 PDF 全文…");
+      full = await this._getFullTextForItem(att);
+    }
+    if (!full || !full.trim()) throw new Error("PDF 全文为空（可能是扫描件，需先 OCR）");
+    const text = this._textForSummary(full, this.SUMMARY_MAX_CHARS);
+    const sys = this.pref("summaryPrompt", this.SUMMARY_PROMPT);
+    if (onText) onText("AI 总结中…");
+    const out = await this.callAI(sys, "论文标题：" + (item.getField("title") || "") + "\n\n论文全文：\n\n" + text, { json: false });
+    const summary = String(out || "").trim();
+    if (!summary) throw new Error("AI 未返回总结内容");
+    return summary;
+  },
+
+  // 拼装总结笔记 HTML（含 SUMMARY_MARKER 供去重识别）。总结正文走轻量 Markdown→HTML。
+  _renderSummaryNote(title, summary) {
+    const esc = (s) =>
+      String(s || "")
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;");
+    return (
+      `<h1>📝 ${esc(title)} — AI 总结</h1>` +
+      `<p style="color:#888"><i>${esc(this.SUMMARY_MARKER)}</i></p>` +
+      this._mdToNoteHtml(summary)
+    );
+  },
+
+  // 轻量 Markdown→HTML（供总结笔记用）：支持 #/##/### 标题、- * 无序列表、1. 有序列表、**加粗**。
+  // 先转义 HTML 实体，再在转义后的文本上套标记，安全且足够覆盖 AI 的常见 Markdown 输出。
+  _mdToNoteHtml(md) {
+    const esc = (s) =>
+      String(s || "")
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;");
+    const inline = (s) =>
+      esc(s)
+        .replace(/\*\*([^*\n]+)\*\*/g, "<strong>$1</strong>")
+        .replace(/__([^_\n]+)__/g, "<strong>$1</strong>");
+    const lines = String(md || "").replace(/\r\n?/g, "\n").split("\n");
+    const out = [];
+    let list = null; // "ul" | "ol"
+    const closeList = () => {
+      if (list) {
+        out.push("</" + list + ">");
+        list = null;
+      }
+    };
+    for (const raw of lines) {
+      const line = raw.trim();
+      if (!line) {
+        closeList();
+        continue;
+      }
+      let m;
+      if ((m = line.match(/^(#{1,6})\s+(.*)$/))) {
+        closeList();
+        // # → h2，## → h3，### 及更深 → h4（笔记标题已占 h1）。
+        // 显式字号 + 下限 14px：避免深层标题用默认 h4/h5/h6 渲染得比正文还小、视觉骤降。
+        const lvl = Math.min(4, m[1].length + 1);
+        const size = { 2: "17px", 3: "15px", 4: "14px" }[lvl];
+        const weight = lvl >= 4 ? "600" : "700";
+        out.push(
+          "<h" + lvl + ' style="font-size:' + size + ";font-weight:" + weight + ';margin:12px 0 4px;">' +
+            inline(m[2]) +
+            "</h" + lvl + ">"
+        );
+        continue;
+      }
+      if ((m = line.match(/^(?:[-*]|•|·)\s+(.*)$/))) {
+        if (list !== "ul") {
+          closeList();
+          out.push("<ul>");
+          list = "ul";
+        }
+        out.push("<li>" + inline(m[1]) + "</li>");
+        continue;
+      }
+      if ((m = line.match(/^\d+[.、)]\s+(.*)$/))) {
+        if (list !== "ol") {
+          closeList();
+          out.push("<ol>");
+          list = "ol";
+        }
+        out.push("<li>" + inline(m[1]) + "</li>");
+        continue;
+      }
+      closeList();
+      out.push("<p>" + inline(line) + "</p>");
+    }
+    closeList();
+    return out.join("") || "<p>" + esc(md) + "</p>";
+  },
+
+  // 查该条目下是否已有本插件生成的总结笔记（按 SUMMARY_MARKER）
+  _findSummaryNote(item) {
+    try {
+      const ids = item.getNotes ? item.getNotes() : [];
+      for (const id of ids) {
+        const n = Zotero.Items.get(id);
+        const html = n && n.getNote ? n.getNote() : "";
+        if (html && html.indexOf(this.SUMMARY_MARKER) >= 0) return n;
+      }
+    } catch (e) {
+      this.log("_findSummaryNote: " + e);
+    }
+    return null;
+  },
+
+  // 写入/更新总结子笔记。opts.force=true：已存在则覆盖（手动重做）；否则已存在就跳过（自动）
+  async _saveSummaryNote(item, summary, opts) {
+    opts = opts || {};
+    const existing = this._findSummaryNote(item);
+    if (existing && !opts.force) return existing;
+    const html = this._renderSummaryNote(item.getField("title") || "未命名文献", summary);
+    if (existing) {
+      existing.setNote(html);
+      await existing.saveTx();
+      return existing;
+    }
+    const note = new Zotero.Item("note");
+    note.libraryID = item.libraryID;
+    note.parentID = item.id;
+    note.setNote(html);
+    await note.saveTx();
+    return note;
+  },
+
+  // 菜单入口：对选中条目生成整篇总结并存笔记（手动：已有则覆盖）
+  async runSummaryOnSelected() {
+    const pane = Zotero.getActiveZoteroPane();
+    const win = Zotero.getMainWindow();
+    const items = (pane ? pane.getSelectedItems() : []).filter((i) => i.isRegularItem());
+    if (!items.length) {
+      if (win) win.alert("请先选中至少一篇文献条目。");
+      return;
+    }
+    if (this._needKey() && !this.pref("apiKey", "")) {
+      if (win) win.alert("尚未填写 API Key。请到 设置 → Paper Outline 里填写。");
+      return;
+    }
+    const pw = new Zotero.ProgressWindow({ closeOnClick: false });
+    pw.changeHeadline("Paper Outline · 整篇总结");
+    pw.show();
+    let ok = 0;
+    for (const item of items) {
+      const line = new pw.ItemProgress(
+        item.getImageSrc?.() || "",
+        (item.getField("title") || "(无标题)").slice(0, 40) + " …"
+      );
+      try {
+        const summary = await this.generateSummary(item, (t) => line.setText(t));
+        await this._saveSummaryNote(item, summary, { force: true });
+        line.setText("已写入总结笔记");
+        line.setProgress(100);
+        ok++;
+      } catch (e) {
+        this.log("summary error: " + e);
+        line.setError();
+        line.setText("失败：" + String(e).slice(0, 80));
+      }
+    }
+    pw.addDescription(`完成 ${ok}/${items.length}`);
+    pw.startCloseTimer(4000);
+  },
+
+  // ── 自动模式下生成目录（无 reader）：worker 抽页 → AI → 补页码 → 缓存 ──
+  async _buildOutlineAuto(item, att, onText) {
+    let pages = null;
+    try {
+      pages = await this._getWorkerPages(att);
+    } catch (e) {}
+    const pagedText =
+      pages && pages.length
+        ? pages.map((t, i) => `\n\n===== 第 ${i + 1} 页 =====\n` + t).join("")
+        : null;
+    const outline = await this.generateOutline(item, onText, { pagedText, att });
+    if (outline && outline.length) {
+      try {
+        await this._fillPages(item, null, outline, pages);
+        this._setCache(item.key, outline);
+      } catch (e) {
+        this.log("_buildOutlineAuto fillPages: " + e);
+      }
+    }
+    return outline;
+  },
+
+  // ════════════════════════════════════════════════════════════════
+  //  入库自动处理：监听条目 add 事件 → 队列限流 → 自动总结 / 目录
+  // ════════════════════════════════════════════════════════════════
+  _notifierID: null,
+  _autoQueue: [],
+  _autoSet: null,
+  _autoRunning: false,
+
+  _autoOutlineOn() {
+    return this.pref("autoOutline", true) !== false;
+  },
+  _autoSummaryOn() {
+    return this.pref("autoSummary", true) !== false;
+  },
+
+  registerAutoObserver() {
+    try {
+      if (this._notifierID) return;
+      const self = this;
+      this._notifierID = Zotero.Notifier.registerObserver(
+        {
+          notify(event, type, ids, extraData) {
+            try {
+              self._onNotify(event, type, ids);
+            } catch (e) {
+              self.log("notify: " + e);
+            }
+          },
+        },
+        ["item"],
+        "paperoutline-auto"
+      );
+      this.log("auto observer registered");
+    } catch (e) {
+      this.log("registerAutoObserver: " + e);
+    }
+  },
+
+  unregisterAutoObserver() {
+    try {
+      if (this._notifierID) {
+        Zotero.Notifier.unregisterObserver(this._notifierID);
+        this._notifierID = null;
+      }
+    } catch (e) {
+      this.log("unregisterAutoObserver: " + e);
+    }
+  },
+
+  // 仅在 PDF 附件被新增时触发（→ 其父文献条目）。覆盖浏览器抓取 / 拖入 PDF / 按 DOI 添加等。
+  _onNotify(event, type, ids) {
+    if (event !== "add") return;
+    if (!this._autoOutlineOn() && !this._autoSummaryOn()) return; // 两个开关都关 = 不监听
+    if (this._needKey() && !this.pref("apiKey", "")) return; // 没配 Key 不打扰
+    const parents = new Set();
+    for (const id of ids || []) {
+      try {
+        const it = Zotero.Items.get(id);
+        if (!it || (it.isFeedItem && it.isFeedItem())) continue; // 跳过 RSS feed 条目
+        if (it.isPDFAttachment && it.isPDFAttachment() && it.parentItemID) {
+          const p = Zotero.Items.get(it.parentItemID);
+          if (p && p.isRegularItem && p.isRegularItem()) parents.add(p.id);
+        }
+      } catch (e) {}
+    }
+    for (const pid of parents) this._enqueueAuto(pid);
+  },
+
+  _enqueueAuto(itemID) {
+    if (!this._autoSet) this._autoSet = new Set();
+    if (this._autoSet.has(itemID)) return;
+    this._autoSet.add(itemID);
+    this._autoQueue.push(itemID);
+    this._drainAuto();
+  },
+
+  // 顺序处理队列（一次一篇 + 篇间停顿），避免批量导入时并发狂刷 API
+  async _drainAuto() {
+    if (this._autoRunning) return;
+    this._autoRunning = true;
+    try {
+      while (this._autoQueue.length) {
+        const id = this._autoQueue.shift();
+        try {
+          await this._autoProcess(id);
+        } catch (e) {
+          this.log("auto process " + id + ": " + e);
+        }
+        if (this._autoSet) this._autoSet.delete(id);
+        await this._sleep(1200);
+      }
+    } finally {
+      this._autoRunning = false;
+    }
+  },
+
+  async _autoProcess(itemID) {
+    const item = Zotero.Items.get(itemID);
+    if (!item || !item.isRegularItem()) return;
+    const wantOutline = this._autoOutlineOn();
+    const wantSummary = this._autoSummaryOn();
+    if (!wantOutline && !wantSummary) return;
+    if (this._needKey() && !this.pref("apiKey", "")) return;
+
+    const att = await this._bestPdf(item);
+    if (!att) return; // 没 PDF（可能还没下完）→ 等下次（再加 PDF 会再触发）
+
+    // 等正文就绪：刚入库时文件可能还在写入/抽取，重试几次
+    let full = "";
+    for (let i = 0; i < 4; i++) {
+      full = await this._getFullTextForItem(att);
+      if (full.trim()) break;
+      await this._sleep(3000);
+    }
+    if (!full.trim()) {
+      this.log("auto: 无可用正文，跳过 " + item.key);
+      return;
+    }
+
+    const did = [];
+    if (wantSummary) {
+      try {
+        if (!this._findSummaryNote(item)) {
+          const summary = await this.generateSummary(item, null, { att, fullText: full });
+          await this._saveSummaryNote(item, summary, {});
+          did.push("总结");
+        }
+      } catch (e) {
+        this.log("auto summary " + item.key + ": " + e);
+      }
+    }
+    if (wantOutline) {
+      try {
+        if (!this._getCache(item.key)) {
+          const o = await this._buildOutlineAuto(item, att, null);
+          if (o && o.length) did.push("目录");
+        }
+      } catch (e) {
+        this.log("auto outline " + item.key + ": " + e);
+      }
+    }
+    if (did.length) this._autoToast(item, did);
+  },
+
+  _autoToast(item, did) {
+    try {
+      const pw = new Zotero.ProgressWindow();
+      pw.changeHeadline("Paper Outline · 自动");
+      const ip = new pw.ItemProgress(
+        item.getImageSrc?.() || "",
+        (item.getField("title") || "").slice(0, 32)
+      );
+      ip.setProgress(100);
+      pw.show();
+      pw.addDescription("已生成：" + did.join(" + "));
+      pw.startCloseTimer(3500);
+    } catch (e) {}
   },
 };
