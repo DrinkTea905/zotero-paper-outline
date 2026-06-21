@@ -1636,4 +1636,146 @@ var PaperOutline = {
       pw.startCloseTimer(3500);
     } catch (e) {}
   },
+
+  // ════════════════════════════════════════════════════════════════
+  //  去除文字空格 —— 中文 PDF 复制后字间空格清理，纯规则、不用 AI
+  //  阅读器工具栏放一个「粉色小猫」图标：点它 = 读剪贴板 → 清理 → 写回
+  //  开关在「设置 → 高级选项 → 去除文字空格」，默认开（帮助里全称含「（小崔定制）」）
+  // ════════════════════════════════════════════════════════════════
+  DESPACE_BTN_ID: "paper-outline-despace-btn",
+
+  // 核心：去掉中文之间、以及中文与英文/数字之间的多余空白。中英之间不留空格。
+  cleanSpaces(text) {
+    if (text == null) return text;
+    let s = String(text).replace(/\r\n?/g, "\n");
+    s = s.replace(/[   ]/g, " "); // 不间断空格 / 数字空格 → 普通空格
+    // 全角空格 / 不间断空格 → 普通空格，统一处理
+    s = s.replace(/[ 　]/g, " ");
+    // CJK 字符范围（中日韩文字、假名、各类中文标点、全角/半角符号）
+    const C =
+      "\\u2E80-\\u2EFF\\u3000-\\u303F\\u3040-\\u30FF\\u31C0-\\u31EF\\u31F0-\\u31FF" +
+      "\\u3400-\\u4DBF\\u4E00-\\u9FFF\\uF900-\\uFAFF\\uFE30-\\uFE4F\\uFF00-\\uFFEF";
+    // 1) 中文 ↔ 中文 之间的空格/制表符 → 删除
+    s = s.replace(new RegExp("(?<=[" + C + "])[ \\t]+(?=[" + C + "])", "g"), "");
+    // 2) 中文 ↔ 英文/数字 之间的空格 → 删除（中英不留空格）
+    s = s.replace(new RegExp("(?<=[" + C + "])[ \\t]+(?=[A-Za-z0-9])", "g"), "");
+    s = s.replace(new RegExp("(?<=[A-Za-z0-9])[ \\t]+(?=[" + C + "])", "g"), "");
+    // 3) 中文行尾因 PDF 换行产生的【单个换行】并回上一行（保留空行＝段落分隔）
+    s = s.replace(new RegExp("(?<=[" + C + "])\\n(?!\\n)(?=[" + C + "])", "g"), "");
+    // 4) 英文内部 2+ 连续空格压成一个（保住英文单词之间的真空格）
+    s = s.replace(/[ \t]{2,}/g, " ");
+    // 5) 去掉每行首尾多余空格
+    s = s.replace(/[ \t]+$/gm, "").replace(/^[ \t]+/gm, "");
+    return s.trim();
+  },
+
+  // 顶部小提示（复用 Zotero ProgressWindow）
+  _despaceToast(headline, desc) {
+    try {
+      const pw = new Zotero.ProgressWindow();
+      pw.changeHeadline("去除文字空格 · " + headline);
+      pw.show();
+      if (desc) pw.addDescription(desc);
+      pw.startCloseTimer(2500);
+    } catch (e) {}
+  },
+
+  // 方案A 动作：读剪贴板 → 清理 → 写回
+  cleanClipboardSpaces() {
+    try {
+      const UI = Zotero.Utilities.Internal;
+      let txt = UI.getClipboard("text/plain");
+      if (txt == null) { try { txt = UI.getClipboard("text/unicode"); } catch (e) {} }
+      if (txt == null || txt === "") {
+        this._despaceToast("剪贴板为空", "请先复制文字，再点这个图标");
+        return;
+      }
+      const cleaned = this.cleanSpaces(txt);
+      if (cleaned === txt) {
+        this._despaceToast("无需处理", "没有发现多余空格");
+        return;
+      }
+      UI.copyTextToClipboard(cleaned);
+      const removed = txt.length - cleaned.length;
+      this._despaceToast("已清理", "去掉了 " + removed + " 处空白，直接粘贴即可");
+    } catch (e) {
+      this.log("cleanClipboardSpaces: " + e);
+      this._despaceToast("出错", String(e));
+    }
+  },
+
+  // 造一个工具栏按钮：粉色小猫图标（醒目）
+  _makeDespaceButton(doc) {
+    const btn = doc.createElement("button");
+    btn.id = this.DESPACE_BTN_ID;
+    btn.className = "toolbar-button";
+    btn.setAttribute("title", "去除文字空格：点我清理刚复制的文字");
+    btn.setAttribute("tabindex", "-1");
+    // 粉色小猫（耳朵+脸+眼睛+鼻子+胡须）
+    btn.innerHTML =
+      '<svg width="20" height="20" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">' +
+      '<path d="M4 3.8 L9.4 9 L4 10.4 Z" fill="#ff6fb5"/>' +
+      '<path d="M20 3.8 L14.6 9 L20 10.4 Z" fill="#ff6fb5"/>' +
+      '<path d="M12 5.6 C16.5 5.6 19.2 8.8 19.2 13 C19.2 17.3 16 19.9 12 19.9 C8 19.9 4.8 17.3 4.8 13 C4.8 8.8 7.5 5.6 12 5.6 Z" fill="#ff90d0"/>' +
+      '<circle cx="9.4" cy="12.4" r="1.05" fill="#48243d"/>' +
+      '<circle cx="14.6" cy="12.4" r="1.05" fill="#48243d"/>' +
+      '<path d="M11 15 L13 15 L12 16.2 Z" fill="#e03a8e"/>' +
+      '<path d="M5.2 12.9 L8.4 13.1 M5.3 14.3 L8.4 14 M18.8 12.9 L15.6 13.1 M18.7 14.3 L15.6 14" stroke="#f0a6d2" stroke-width="0.6" stroke-linecap="round"/>' +
+      "</svg>";
+    btn.addEventListener("click", (e) => {
+      try { e.preventDefault(); e.stopPropagation(); } catch (er) {}
+      PaperOutline.cleanClipboardSpaces();
+    });
+    return btn;
+  },
+
+  // 把按钮放到页码指示「X / Y」(#numPages) 的右边。
+  // 注意：#numPages 要等 pageLabel 就绪才渲染，首次工具栏渲染时可能还没有 →
+  // 先临时挂在页码输入框(#pageNumber)后；待 #numPages 出现的那次渲染再归位到它右边。
+  _injectDespaceButton(event) {
+    const doc = event && event.doc;
+    if (!doc) return;
+    const existing = doc.getElementById(this.DESPACE_BTN_ID);
+    if (!this.pref("despaceButton", true)) { if (existing) existing.remove(); return; } // 关掉则移除
+    const np = doc.getElementById("numPages");                 // 「X / Y」(目标锚点)
+    const anchor = np || doc.getElementById("pageNumber");      // 没好就先用页码输入框
+    if (!anchor || !anchor.parentNode) return;                 // 页码区还没渲染，等下次
+    if (existing) {
+      if (existing.previousElementSibling === anchor) return;   // 已在锚点右边 → 稳定，别动
+      existing.remove();                                        // 位置不对（多半锚点已升级成 #numPages）→ 重放
+    }
+    const btn = this._makeDespaceButton(doc);
+    anchor.parentNode.insertBefore(btn, anchor.nextSibling);    // 插到锚点右边
+  },
+
+  // 注册：renderToolbar 时把「粉色小猫」按钮注入工具栏
+  registerDespace() {
+    try {
+      if (!(Zotero.Reader && typeof Zotero.Reader.registerEventListener === "function")) return;
+      Zotero.Reader.registerEventListener(
+        "renderToolbar",
+        (event) => {
+          if (typeof PaperOutline === "undefined") return;
+          try { PaperOutline._injectDespaceButton(event); } catch (e) { PaperOutline.log("despace btn: " + e); }
+        },
+        this.id
+      );
+      this.log("despace registered (button=" + this.pref("despaceButton", true) + ")");
+    } catch (e) {
+      this.log("registerDespace: " + e);
+    }
+  },
+
+  // 关闭插件时清理：移除已注入按钮
+  unregisterDespace() {
+    try {
+      (Zotero.Reader._readers || []).forEach((r) => {
+        try {
+          const d = r && r._iframeWindow && r._iframeWindow.document;
+          const b = d && d.getElementById(this.DESPACE_BTN_ID);
+          if (b) b.remove();
+        } catch (e) {}
+      });
+    } catch (e) {}
+  },
 };

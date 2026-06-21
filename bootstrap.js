@@ -34,6 +34,8 @@ async function startup({ id, version, rootURI }) {
   PaperOutline.registerMenu();
   // 注入阅读器左侧「大纲」栏（DOM 注入 reader iframe）
   PaperOutline.registerReaderOutline();
+  // 去除文字空格：阅读器工具栏「粉色小猫」图标 → 点一下清理剪贴板
+  PaperOutline.registerDespace();
   // 入库自动处理：监听条目新增 → 自动生成总结/目录（默认开，可在设置里关）
   PaperOutline.registerAutoObserver();
   PaperOutline.log("started v" + version);
@@ -56,6 +58,7 @@ function shutdown() {
   if (typeof PaperOutline !== "undefined") {
     PaperOutline.unregisterMenu();
     PaperOutline.unregisterAutoObserver();
+    try { PaperOutline.unregisterDespace(); } catch (e) {}
     // eslint-disable-next-line no-global-assign
     PaperOutline = undefined;
   }
