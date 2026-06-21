@@ -1646,6 +1646,7 @@ var PaperOutline = {
   //  开关在「设置 → 高级选项 → 去除文字空格」，默认开（帮助里全称含「（小崔定制）」）
   // ════════════════════════════════════════════════════════════════
   DESPACE_BTN_ID: "paper-outline-despace-btn",
+  ANNOT_BTN_ID: "paper-outline-despace-annot-bar",
 
   // 核心：去掉中文之间、以及中文与英文/数字之间的多余空白。中英之间不留空格。
   cleanSpaces(text) {
@@ -1757,6 +1758,86 @@ var PaperOutline = {
     }
   },
 
+  // 一键清理：把本 PDF 所有标注里的空格去掉（高亮/下划线的文字 + 任意标注的批注），直接改存标注
+  async cleanAllAnnotations(reader) {
+    try {
+      const att = reader && reader._item;
+      if (!att || typeof att.getAnnotations !== "function") {
+        this._despaceToast("没找到标注", "请在打开的 PDF 阅读器里使用");
+        return;
+      }
+      let annots = [];
+      try { annots = att.getAnnotations() || []; } catch (e) { this.log("getAnnotations: " + e); }
+      if (!annots.length) { this._despaceToast("没有标注", "本 PDF 暂无标注"); return; }
+      // 预扫：算出哪些需要改（只改真的有多余空格的）
+      const targets = [];
+      for (const a of annots) {
+        let nt = null, nc = null;
+        const type = a.annotationType;
+        if ((type === "highlight" || type === "underline") && a.annotationText) {
+          const c = this.cleanSpaces(a.annotationText);
+          if (c !== a.annotationText) nt = c;
+        }
+        if (a.annotationComment) {
+          const c = this.cleanSpaces(a.annotationComment);
+          if (c !== a.annotationComment) nc = c;
+        }
+        if (nt != null || nc != null) targets.push({ a, nt, nc });
+      }
+      if (!targets.length) { this._despaceToast("无需处理", "标注里没有多余空格"); return; }
+      let n = 0;
+      for (const t of targets) {
+        try {
+          if (t.nt != null) t.a.annotationText = t.nt;
+          if (t.nc != null) t.a.annotationComment = t.nc;
+          await t.a.saveTx();
+          n++;
+        } catch (e) { this.log("clean annot save: " + e); }
+      }
+      this._despaceToast("标注已清理", "处理了 " + n + " / " + targets.length + " 条标注");
+    } catch (e) {
+      this.log("cleanAllAnnotations: " + e);
+      this._despaceToast("出错", String(e));
+    }
+  },
+
+  // 在标注栏（注释列表 #annotations）顶部注入「去除全部标注空格」按钮（粉色小猫）
+  _injectAnnotCleanButton(event) {
+    if (!this.pref("despaceButton", true)) return;
+    const doc = event && event.doc;
+    if (!doc) return;
+    if (doc.getElementById(this.ANNOT_BTN_ID)) return; // 幂等
+    const list = doc.getElementById("annotations"); // 注释列表容器（切到「注释」标签才有）
+    if (!list || !list.parentNode) return;
+    const bar = doc.createElement("div");
+    bar.id = this.ANNOT_BTN_ID;
+    bar.style.cssText = "display:flex;justify-content:center;padding:7px 8px;box-sizing:border-box;";
+    const btn = doc.createElement("button");
+    const BG = "#ff3d9a", BG2 = "#ff1f8a"; // 醒目热粉
+    btn.style.cssText =
+      "width:100%;height:32px;padding:0 12px;gap:7px;display:flex;align-items:center;justify-content:center;" +
+      "font-size:13px;font-weight:700;letter-spacing:.5px;color:#fff;background:" + BG + ";border:none;" +
+      "border-radius:8px;cursor:pointer;box-shadow:0 2px 6px rgba(255,61,154,.5);";
+    btn.onmouseover = () => { btn.style.background = BG2; };
+    btn.onmouseout = () => { btn.style.background = BG; };
+    btn.setAttribute("title", "把本 PDF 所有标注里的空格一次性去除");
+    btn.innerHTML =
+      '<svg width="18" height="18" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">' +
+      '<path d="M4 3.8 L9.4 9 L4 10.4 Z" fill="#fff"/>' +
+      '<path d="M20 3.8 L14.6 9 L20 10.4 Z" fill="#fff"/>' +
+      '<path d="M12 5.6 C16.5 5.6 19.2 8.8 19.2 13 C19.2 17.3 16 19.9 12 19.9 C8 19.9 4.8 17.3 4.8 13 C4.8 8.8 7.5 5.6 12 5.6 Z" fill="#fff"/>' +
+      '<circle cx="9.4" cy="12.4" r="1.05" fill="' + BG + '"/>' +
+      '<circle cx="14.6" cy="12.4" r="1.05" fill="' + BG + '"/>' +
+      '<path d="M11 15 L13 15 L12 16.2 Z" fill="' + BG + '"/>' +
+      "</svg><span>去除全部标注空格</span>";
+    btn.addEventListener("click", (e) => {
+      try { e.preventDefault(); e.stopPropagation(); } catch (er) {}
+      PaperOutline.cleanAllAnnotations(event.reader);
+    });
+    bar.appendChild(btn);
+    list.parentNode.insertBefore(bar, list); // 放到注释列表上方
+  },
+
   // 注册：renderToolbar 时把「粉色小猫」按钮注入工具栏；并给已打开的阅读器补一次
   registerDespace() {
     try {
@@ -1769,10 +1850,22 @@ var PaperOutline = {
         },
         this.id
       );
-      // 已打开的阅读器（重装/启用插件时，工具栏不一定会重渲）→ 直接对其文档注入一次
+      // 标注栏：每次标注渲染时确保「去除全部标注空格」按钮在注释列表顶部
+      Zotero.Reader.registerEventListener(
+        "renderSidebarAnnotationHeader",
+        (event) => {
+          if (typeof PaperOutline === "undefined") return;
+          try { PaperOutline._injectAnnotCleanButton(event); } catch (e) { PaperOutline.log("annot btn: " + e); }
+        },
+        this.id
+      );
+      // 已打开的阅读器（重装/启用插件时不一定会重渲）→ 直接对其文档注入一次
       try {
         (Zotero.Reader._readers || []).forEach((r) => {
-          try { const d = r && r._iframeWindow && r._iframeWindow.document; if (d) PaperOutline._injectDespaceButton({ doc: d }); } catch (e) {}
+          try {
+            const d = r && r._iframeWindow && r._iframeWindow.document;
+            if (d) { PaperOutline._injectDespaceButton({ doc: d }); PaperOutline._injectAnnotCleanButton({ doc: d, reader: r }); }
+          } catch (e) {}
         });
       } catch (e) {}
       this.log("despace registered (button=" + this.pref("despaceButton", true) + ")");
@@ -1787,8 +1880,11 @@ var PaperOutline = {
       (Zotero.Reader._readers || []).forEach((r) => {
         try {
           const d = r && r._iframeWindow && r._iframeWindow.document;
-          const b = d && d.getElementById(this.DESPACE_BTN_ID);
+          if (!d) return;
+          const b = d.getElementById(this.DESPACE_BTN_ID);
           if (b) b.remove();
+          const bar = d.getElementById(this.ANNOT_BTN_ID);
+          if (bar) bar.remove();
         } catch (e) {}
       });
     } catch (e) {}
