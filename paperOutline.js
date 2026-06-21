@@ -420,7 +420,10 @@ var PaperOutline = {
       if (s.summary || pg) {
         row.setAttribute("title", (s.summary || "") + (pg ? (s.summary ? "\n" : "") + "→ 第 " + pg + " 页" : ""));
       }
-      row.addEventListener("click", () => PaperOutline._readerJump(reader, s));
+      row.addEventListener("click", () => {
+        PaperOutline._setActiveRow(doc, row); // 点谁高亮谁（修同页多小标题时高亮跑到下一个）
+        PaperOutline._readerJump(reader, s);
+      });
       box.appendChild(row);
     }
 
@@ -533,12 +536,31 @@ var PaperOutline = {
     }
   },
 
+  // 直接高亮指定行（点击时用：点谁亮谁）
+  _setActiveRow(doc, row) {
+    try {
+      const box = doc.getElementById("paper-outline-reader");
+      if (!box || !row) return;
+      Array.from(box.querySelectorAll(".po-item")).forEach((r) => r.classList.remove("po-active"));
+      row.classList.add("po-active");
+    } catch (e) {}
+  },
+
   // 按当前页高亮对应章节并滚动到可见
   _highlightReaderOutline(doc, pageNum) {
     try {
       const box = doc.getElementById("paper-outline-reader");
       if (!box) return;
       const rows = Array.from(box.querySelectorAll(".po-item"));
+      // 若已高亮的章节就在当前页，保持不动 —— 同一页有多个小标题时，避免翻页事件把高亮顶到该页最后一个
+      const active = box.querySelector(".po-item.po-active");
+      if (active) {
+        const ap = parseInt(active.getAttribute("data-page"), 10);
+        if (ap > 0 && ap === pageNum) {
+          if (active.style.display !== "none") { try { active.scrollIntoView({ block: "nearest" }); } catch (e) {} }
+          return;
+        }
+      }
       let best = null;
       for (const r of rows) {
         const p = parseInt(r.getAttribute("data-page"), 10);
