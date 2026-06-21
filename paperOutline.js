@@ -1813,22 +1813,22 @@ var PaperOutline = {
     bar.id = this.ANNOT_BTN_ID;
     bar.style.cssText = "display:flex;justify-content:center;padding:7px 8px;box-sizing:border-box;";
     const btn = doc.createElement("button");
-    const BG = "#ff3d9a", BG2 = "#ff1f8a"; // 醒目热粉
+    const PINK = "#ff3d9a"; // 粉色描边 + 粉色小猫
     btn.style.cssText =
       "width:100%;height:32px;padding:0 12px;gap:7px;display:flex;align-items:center;justify-content:center;" +
-      "font-size:13px;font-weight:700;letter-spacing:.5px;color:#fff;background:" + BG + ";border:none;" +
-      "border-radius:8px;cursor:pointer;box-shadow:0 2px 6px rgba(255,61,154,.5);";
-    btn.onmouseover = () => { btn.style.background = BG2; };
-    btn.onmouseout = () => { btn.style.background = BG; };
+      "font-size:13px;font-weight:700;letter-spacing:.5px;color:#000;background:#fff;border:1.5px solid " + PINK + ";" +
+      "border-radius:8px;cursor:pointer;box-shadow:0 1px 4px rgba(255,61,154,.28);";
+    btn.onmouseover = () => { btn.style.background = "#fff0f7"; };
+    btn.onmouseout = () => { btn.style.background = "#fff"; };
     btn.setAttribute("title", "把本 PDF 所有标注里的空格一次性去除");
     btn.innerHTML =
       '<svg width="18" height="18" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">' +
-      '<path d="M4 3.8 L9.4 9 L4 10.4 Z" fill="#fff"/>' +
-      '<path d="M20 3.8 L14.6 9 L20 10.4 Z" fill="#fff"/>' +
-      '<path d="M12 5.6 C16.5 5.6 19.2 8.8 19.2 13 C19.2 17.3 16 19.9 12 19.9 C8 19.9 4.8 17.3 4.8 13 C4.8 8.8 7.5 5.6 12 5.6 Z" fill="#fff"/>' +
-      '<circle cx="9.4" cy="12.4" r="1.05" fill="' + BG + '"/>' +
-      '<circle cx="14.6" cy="12.4" r="1.05" fill="' + BG + '"/>' +
-      '<path d="M11 15 L13 15 L12 16.2 Z" fill="' + BG + '"/>' +
+      '<path d="M4 3.8 L9.4 9 L4 10.4 Z" fill="#ff6fb5"/>' +
+      '<path d="M20 3.8 L14.6 9 L20 10.4 Z" fill="#ff6fb5"/>' +
+      '<path d="M12 5.6 C16.5 5.6 19.2 8.8 19.2 13 C19.2 17.3 16 19.9 12 19.9 C8 19.9 4.8 17.3 4.8 13 C4.8 8.8 7.5 5.6 12 5.6 Z" fill="#ff90d0"/>' +
+      '<circle cx="9.4" cy="12.4" r="1.05" fill="#48243d"/>' +
+      '<circle cx="14.6" cy="12.4" r="1.05" fill="#48243d"/>' +
+      '<path d="M11 15 L13 15 L12 16.2 Z" fill="#e03a8e"/>' +
       "</svg><span>去除全部标注空格</span>";
     btn.addEventListener("click", (e) => {
       try { e.preventDefault(); e.stopPropagation(); } catch (er) {}
