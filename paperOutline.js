@@ -1729,26 +1729,32 @@ var PaperOutline = {
     return btn;
   },
 
-  // 把按钮放到页码指示「X / Y」(#numPages) 的右边。
-  // 注意：#numPages 要等 pageLabel 就绪才渲染，首次工具栏渲染时可能还没有 →
-  // 先临时挂在页码输入框(#pageNumber)后；待 #numPages 出现的那次渲染再归位到它右边。
+  // 把按钮放到中间标注工具组(.center.tools)最前面 —— 用户选定的「中间」位置（标注工具左边）。
+  // .center 随工具栏一起渲染，比 #numPages 早且稳，首次渲染即可就位、无需等待。
   _injectDespaceButton(event) {
     const doc = event && event.doc;
     if (!doc) return;
-    const existing = doc.getElementById(this.DESPACE_BTN_ID);
+    let existing = doc.getElementById(this.DESPACE_BTN_ID);
     if (!this.pref("despaceButton", true)) { if (existing) existing.remove(); return; } // 关掉则移除
-    const np = doc.getElementById("numPages");                 // 「X / Y」(目标锚点)
-    const anchor = np || doc.getElementById("pageNumber");      // 没好就先用页码输入框
-    if (!anchor || !anchor.parentNode) return;                 // 页码区还没渲染，等下次
-    if (existing) {
-      if (existing.previousElementSibling === anchor) return;   // 已在锚点右边 → 稳定，别动
-      existing.remove();                                        // 位置不对（多半锚点已升级成 #numPages）→ 重放
+    const center = doc.querySelector(".center.tools") || doc.querySelector(".toolbar .center");
+    if (center) {
+      // 已在中间组最前 → 稳定，别动（React 重渲后本监听会再触发、自动补回）
+      if (existing && existing.parentNode === center && center.firstElementChild === existing) return;
+      if (existing) { existing.remove(); existing = null; } // 位置不对就先摘掉再放
+      center.insertBefore(this._makeDespaceButton(doc), center.firstChild); // 放中间组最前
+      return;
     }
-    const btn = this._makeDespaceButton(doc);
-    anchor.parentNode.insertBefore(btn, anchor.nextSibling);    // 插到锚点右边
+    // 中间组还没渲染：先临时放页码后；下次 .center 出现会被上面分支归位
+    if (existing) return;
+    const anchor = doc.getElementById("numPages") || doc.getElementById("pageNumber");
+    if (anchor && anchor.parentNode) {
+      anchor.parentNode.insertBefore(this._makeDespaceButton(doc), anchor.nextSibling);
+    } else if (typeof event.append === "function") {
+      event.append(this._makeDespaceButton(doc));
+    }
   },
 
-  // 注册：renderToolbar 时把「粉色小猫」按钮注入工具栏
+  // 注册：renderToolbar 时把「粉色小猫」按钮注入工具栏；并给已打开的阅读器补一次
   registerDespace() {
     try {
       if (!(Zotero.Reader && typeof Zotero.Reader.registerEventListener === "function")) return;
@@ -1760,6 +1766,12 @@ var PaperOutline = {
         },
         this.id
       );
+      // 已打开的阅读器（重装/启用插件时，工具栏不一定会重渲）→ 直接对其文档注入一次
+      try {
+        (Zotero.Reader._readers || []).forEach((r) => {
+          try { const d = r && r._iframeWindow && r._iframeWindow.document; if (d) PaperOutline._injectDespaceButton({ doc: d }); } catch (e) {}
+        });
+      } catch (e) {}
       this.log("despace registered (button=" + this.pref("despaceButton", true) + ")");
     } catch (e) {
       this.log("registerDespace: " + e);
