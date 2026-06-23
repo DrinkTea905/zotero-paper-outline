@@ -1945,7 +1945,23 @@ var PaperOutline = {
     return null;
   },
 
-  // 核心：把附件文件放上剪贴板（application/x-moz-file → Windows 转 CF_HDROP，可粘贴成文件）
+  // 单文件：把一个文件放上剪贴板（application/x-moz-file → Windows 转 CF_HDROP，可粘贴成文件）
+  _putFileOnClipboard(path) {
+    const file = Zotero.File.pathToFile(path);
+    const Cc = Components.classes, Ci = Components.interfaces;
+    const trans = Cc["@mozilla.org/widget/transferable;1"].createInstance(Ci.nsITransferable);
+    trans.init(null);
+    trans.addDataFlavor("application/x-moz-file");
+    trans.setTransferData("application/x-moz-file", file);
+    Cc["@mozilla.org/widget/clipboard;1"].getService(Ci.nsIClipboard)
+      .setData(trans, null, Ci.nsIClipboard.kGlobalClipboard);
+  },
+
+  _fileBaseName(path) {
+    try { return Zotero.File.pathToFile(path).leafName; } catch (e) { return "PDF"; }
+  },
+
+  // 把一个条目对应的 PDF 文件复制到剪贴板（单文件）
   async copyAttachmentFile(itemOrAtt) {
     try {
       const att = await this._resolveFileAttachment(itemOrAtt);
@@ -1955,79 +1971,22 @@ var PaperOutline = {
       if (!path) { try { path = await att.getFilePathAsync(); } catch (e) {} }
       if (!path) { this._cfToast("文件未找到", "附件可能未下载或已丢失"); return; }
       try { if (!(await IOUtils.exists(path))) { this._cfToast("文件不存在", String(path)); return; } } catch (e) {}
-      const file = Zotero.File.pathToFile(path);
-      const Cc = Components.classes, Ci = Components.interfaces;
-      const trans = Cc["@mozilla.org/widget/transferable;1"].createInstance(Ci.nsITransferable);
-      trans.init(null);
-      trans.addDataFlavor("application/x-moz-file");
-      trans.setTransferData("application/x-moz-file", file);
-      Cc["@mozilla.org/widget/clipboard;1"].getService(Ci.nsIClipboard)
-        .setData(trans, null, Ci.nsIClipboard.kGlobalClipboard);
-      const name = att.attachmentFilename || (file && file.leafName) || "PDF";
-      this._cfToast("已复制文件", name + " · 可粘贴到文件夹/邮件/聊天");
+      this._putFileOnClipboard(path);
+      this._cfToast("已复制文件", (att.attachmentFilename || this._fileBaseName(path)) + " · 可粘贴到文件夹/邮件/聊天");
     } catch (e) {
       this.log("copyAttachmentFile: " + e);
       this._cfToast("复制失败", String(e));
     }
   },
 
-  // 文库右键菜单调用：复制当前选中条目的文件
+  // 文库右键菜单调用：复制当前选中条目（取第一个）的文件
   copySelectedFile() {
     try {
       const zp = Zotero.getActiveZoteroPane && Zotero.getActiveZoteroPane();
       const items = (zp && zp.getSelectedItems) ? zp.getSelectedItems() : [];
-      if (!items || !items.length) { this._cfToast("未选中条目", "请先选中一篇文献或其 PDF 附件"); return; }
+      if (!items || !items.length) { this._cfToast("未选中条目", "请先选中文献或其 PDF 附件"); return; }
       this.copyAttachmentFile(items[0]);
     } catch (e) { this.log("copySelectedFile: " + e); }
-  },
-
-  // 阅读器里承载选区的窗口（pdf.js 视图窗口 + 外层 reader.html）
-  _readerWins(reader) {
-    const wins = [];
-    if (!reader) return wins;
-    try {
-      const ir = reader._internalReader;
-      [ir && ir._lastView, ir && ir._primaryView, reader._lastView, reader._primaryView].forEach((v) => {
-        try { const w = v && v._iframeWindow; if (w && wins.indexOf(w) < 0) wins.push(w); } catch (e) {}
-      });
-    } catch (e) {}
-    try { if (reader._iframeWindow && wins.indexOf(reader._iframeWindow) < 0) wins.push(reader._iframeWindow); } catch (e) {}
-    return wins;
-  },
-
-  _readerHasSelection(reader) {
-    for (const w of this._readerWins(reader)) {
-      try { const s = w && w.getSelection && w.getSelection().toString(); if (s && s.trim()) return true; } catch (e) {}
-    }
-    return false;
-  },
-
-  // 阅读器 Ctrl+C：无选中文字时复制 PDF 文件（有选中文字则不拦，照常复制文字）
-  _hookReaderCopyFile(reader) {
-    if (!reader || reader.type !== "pdf") return;
-    this._copyFileReaderDocs = this._copyFileReaderDocs || [];
-    for (const w of this._readerWins(reader)) {
-      try {
-        const doc = w && w.document;
-        if (!doc || doc.__poCopyFileHooked) continue;
-        const handler = (e) => {
-          try {
-            if (typeof PaperOutline === "undefined") return;
-            if (!((e.key === "c" || e.key === "C") && (e.ctrlKey || e.metaKey) && !e.altKey && !e.shiftKey)) return;
-            if (!PaperOutline.pref("copyFile", true)) return; // 总开关
-            const t = e.target;
-            const tag = t && t.tagName && String(t.tagName).toLowerCase();
-            if (tag === "input" || tag === "textarea" || (t && t.isContentEditable)) return; // 批注框/输入框里不拦
-            if (PaperOutline._readerHasSelection(reader)) return; // 有选中文字 → 复制文字
-            e.preventDefault(); e.stopPropagation();
-            PaperOutline.copyAttachmentFile(reader._item);
-          } catch (er) {}
-        };
-        doc.addEventListener("keydown", handler, true);
-        doc.__poCopyFileHooked = true;
-        this._copyFileReaderDocs.push({ doc, handler });
-      } catch (e) {}
-    }
   },
 
   // 常规条目是否带至少一个文件附件（同步判断，用于决定 Ctrl+C 是否接管）
@@ -2055,7 +2014,7 @@ var PaperOutline = {
       const zp = win.ZoteroPane || (Zotero.getActiveZoteroPane && Zotero.getActiveZoteroPane());
       if (!zp || !zp.getSelectedItems) return;
       const items = zp.getSelectedItems();
-      if (!items || items.length !== 1) return;
+      if (!items || items.length !== 1) return; // 仅单选时接管，多选交回 Zotero 默认
       const it = items[0];
       let target = null;
       if (it.isFileAttachment && it.isFileAttachment()) target = it;
@@ -2094,21 +2053,8 @@ var PaperOutline = {
           });
         } catch (e) { this.log("copyfile tab menu: " + e); }
       }
-      // ② 阅读器：右键菜单 + 每个阅读器的 Ctrl+C
-      if (Zotero.Reader && typeof Zotero.Reader.registerEventListener === "function") {
-        Zotero.Reader.registerEventListener("createViewContextMenu", (event) => {
-          try {
-            if (typeof PaperOutline === "undefined" || !event || typeof event.append !== "function") return;
-            if (!PaperOutline.pref("copyFile", true)) return; // 总开关
-            event.append({ label: "复制 PDF 文件", onCommand: () => PaperOutline.copyAttachmentFile(event.reader && event.reader._item) });
-          } catch (e) {}
-        }, this.id);
-        Zotero.Reader.registerEventListener("renderToolbar", (event) => {
-          try { if (typeof PaperOutline !== "undefined") PaperOutline._hookReaderCopyFile(event.reader); } catch (e) {}
-        }, this.id);
-        try { (Zotero.Reader._readers || []).forEach((r) => PaperOutline._hookReaderCopyFile(r)); } catch (e) {}
-      }
-      // ③ 文库主窗口 Ctrl+C
+      // （阅读器内右键/Ctrl+C 复制已按需求移除，防与阅读器自身复制冲突；保留「标签右键」与「文库」）
+      // ② 文库主窗口 Ctrl+C
       try {
         const win = Zotero.getMainWindow();
         if (win && !win.__poCopyFileKeyHooked) {
@@ -2137,11 +2083,5 @@ var PaperOutline = {
         this._copyFileKeyWin = null;
       }
     } catch (e) {}
-    try {
-      (this._copyFileReaderDocs || []).forEach((rec) => {
-        try { rec.doc.removeEventListener("keydown", rec.handler, true); rec.doc.__poCopyFileHooked = false; } catch (e) {}
-      });
-    } catch (e) {}
-    this._copyFileReaderDocs = [];
   },
 };
