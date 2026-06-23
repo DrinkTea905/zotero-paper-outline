@@ -101,6 +101,9 @@
         <checkbox native="true" label="去除文字空格：在阅读器工具栏显示「粉色小猫」图标，点它清理刚复制的文字"
           preference="extensions.paperoutline.despaceButton"/>
         <html:div class="po-hint">关掉则不显示该图标。详细用法见下方「使用帮助」。改动后请重开阅读器生效。</html:div>
+        <checkbox native="true" label="复制 PDF 文件：右键 / Ctrl+C 把 PDF 文件复制到剪贴板，可粘贴到文件夹、邮件、聊天"
+          preference="extensions.paperoutline.copyFile"/>
+        <html:div class="po-hint">关掉则恢复 Zotero 默认的 Ctrl+C（题录快速复制），并隐藏相关右键项。详细用法见下方「使用帮助」。</html:div>
         <hbox align="center" style="margin-top:6px">
           <button label="🗑 清空所有目录缓存"
             oncommand="Zotero.PaperOutlineGPT &amp;&amp; Zotero.PaperOutlineGPT.clearAllCacheUI()"/>
@@ -178,6 +181,16 @@
           <html:li>会清理<html:b>高亮 / 下划线</html:b>标注的文字，以及<html:b>任意标注的批注</html:b>；规则与上面一致（中文字间、中英之间不留空格，英文单词间正常空格保留）。</html:li>
           <html:li><html:b>直接改存标注</html:b>（不只是剪贴板），<html:b>纯规则、不调 AI、不联网</html:b>；只会修改真正有多余空格的标注。</html:li>
           <html:li>没有标注时按钮不显示；它和「去除文字空格」共用同一个开关（④ 高级选项）。</html:li>
+        </html:ul>
+
+        <html:h3>复制 PDF 文件</html:h3>
+        <html:ul style="margin:0; padding-left:1.4em;">
+          <html:li>把文献的 PDF <html:b>文件本身</html:b>复制到剪贴板，可直接<html:b>粘贴到文件夹 / 邮件 / 聊天窗口</html:b>（不是复制文字，是复制整个文件）。</html:li>
+          <html:li><html:b>在文库里</html:b>：选中某条文献的「PDF 附件」（或文献条目）→ 按 <html:b>Ctrl+C</html:b>，或<html:b>右键 →「📋 复制 PDF 文件」</html:b>。</html:li>
+          <html:li><html:b>在阅读器顶部标签上</html:b>：<html:b>右键该标签 →「复制 PDF 文件」</html:b>。</html:li>
+          <html:li><html:b>在阅读器 PDF 里</html:b>：在 PDF 上<html:b>右键 →「复制 PDF 文件」</html:b>；或在<html:b>没有选中文字</html:b>时按 <html:b>Ctrl+C</html:b>（若已选中文字，则照常复制文字）。</html:li>
+          <html:li>到目标位置（资源管理器、邮件、微信等）<html:b>Ctrl+V</html:b> 粘贴，即得到该 PDF 文件。</html:li>
+          <html:li>可在「④ 高级选项 →『复制 PDF 文件』」总开关里关闭；关闭后 <html:b>Ctrl+C</html:b> 恢复 Zotero 默认（题录快速复制）。</html:li>
         </html:ul>
 
         <html:h3>常见疑问</html:h3>

@@ -36,6 +36,8 @@ async function startup({ id, version, rootURI }) {
   PaperOutline.registerReaderOutline();
   // 去除文字空格：阅读器工具栏「粉色小猫」图标 → 点一下清理剪贴板
   PaperOutline.registerDespace();
+  // 复制 PDF 文件：文库/阅读器 右键 + Ctrl+C → 把 PDF 文件复制到剪贴板，可直接粘贴
+  PaperOutline.registerCopyFile();
   // 入库自动处理：监听条目新增 → 自动生成总结/目录（默认开，可在设置里关）
   PaperOutline.registerAutoObserver();
   PaperOutline.log("started v" + version);
@@ -59,6 +61,7 @@ function shutdown() {
     PaperOutline.unregisterMenu();
     PaperOutline.unregisterAutoObserver();
     try { PaperOutline.unregisterDespace(); } catch (e) {}
+    try { PaperOutline.unregisterCopyFile(); } catch (e) {}
     // eslint-disable-next-line no-global-assign
     PaperOutline = undefined;
   }
