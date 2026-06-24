@@ -1,7 +1,7 @@
 {
   "manifest_version": 2,
   "name": "Paper Outline",
-  "version": "1.5.2",
+  "version": "1.5.3",
   "description": "用 AI 为论文自动生成整篇总结（存笔记）与带页码的层级目录、逐节摘要（显示在阅读器大纲栏、点击跳转）。文献入库可自动生成，也可右键手动。支持 DeepSeek/OpenAI/Kimi/智谱/通义/SiliconFlow/Ollama 等服务商。另附实用小工具：「去除文字空格」（粉色小猫图标，一键清理中文 PDF 复制的字间空格 + 一键清理整篇标注空格，纯规则不调用 AI）、「复制 PDF 文件」（右键/Ctrl+C 把 PDF 文件复制到剪贴板，可粘贴到文件夹/邮件/聊天）。",
   "homepage_url": "https://github.com/DrinkTea905/zotero-paper-outline",
   "icons": {

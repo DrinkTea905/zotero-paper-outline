@@ -2008,6 +2008,12 @@ var PaperOutline = {
       if (typeof PaperOutline === "undefined") return;
       if (!((e.key === "c" || e.key === "C") && (e.ctrlKey || e.metaKey) && !e.altKey && !e.shiftKey)) return;
       if (!PaperOutline.pref("copyFile", true)) return; // 总开关关 → 放行 Zotero 默认
+      // 🔑 只在「文库」标签激活时接管 Ctrl+C；阅读器(或其它)标签激活时一律放行，
+      //    否则会把阅读器里"复制选中文字"误劫持成"复制 PDF 文件"。
+      try {
+        const tabs = win.Zotero_Tabs;
+        if (tabs && tabs.selectedID && tabs.selectedID !== "zotero-pane") return;
+      } catch (e2) {}
       const t = e.target;
       const tag = t && t.tagName && String(t.tagName).toLowerCase();
       if (tag === "input" || tag === "textarea" || (t && t.isContentEditable)) return; // 输入框里不拦
