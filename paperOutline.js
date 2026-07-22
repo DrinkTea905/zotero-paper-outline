@@ -767,6 +767,7 @@ var PaperOutline = {
     const maxChars = parseInt(this.pref("maxCharsPerChunk", 40000), 10) || 40000;
     const chunks = this._splitText(fullText, maxChars);
     const concurrency = parseInt(this.pref("concurrency", 5), 10) || 5;
+    const outlineReasoningEffort = this.pref("outlineReasoningEffort", "low");
 
     if (onText) onText(`AI 分析中（${chunks.length} 块 / 并发 ${concurrency}）…`);
 
@@ -775,7 +776,9 @@ var PaperOutline = {
         chunks.length > 1
           ? `这是论文的第 ${idx + 1}/${chunks.length} 部分，请只就这部分输出目录条目：\n\n${chunk}`
           : `论文全文：\n\n${chunk}`;
-      const raw = await this.callAI(sys, userMsg);
+      const raw = await this.callAI(sys, userMsg, {
+        reasoningEffort: outlineReasoningEffort,
+      });
       return this._parseOutline(raw);
     });
 
@@ -1129,6 +1132,40 @@ var PaperOutline = {
     return { url, model, key, json: preset.json };
   },
 
+  _normalizeReasoningEffort(value) {
+    const allowed = ["default", "minimal", "low", "medium", "high"];
+    const normalized = String(value || "default").trim().toLowerCase();
+    return allowed.includes(normalized) ? normalized : "default";
+  },
+
+  _isGeminiOpenAIEndpoint(url, model) {
+    const normalizedModel = String(model || "").trim().toLowerCase();
+    if (!normalizedModel.startsWith("gemini-3")) return false;
+
+    const rawUrl = String(url || "").trim();
+    if (!rawUrl) return false;
+
+    if (typeof URL === "function") {
+      try {
+        const parsed = new URL(rawUrl);
+        const pathname = parsed.pathname.replace(/\/+$/, "");
+        return (
+          parsed.hostname.toLowerCase() === "generativelanguage.googleapis.com" &&
+          pathname === "/v1beta/openai/chat/completions"
+        );
+      } catch (e) {
+        // Fall through to the strict string parser for older Zotero environments.
+      }
+    }
+
+    const match = rawUrl.match(
+      /^[a-z][a-z0-9+.-]*:\/\/(generativelanguage\.googleapis\.com)(?::\d+)?(\/[^?#]*)?(?:[?#].*)?$/i
+    );
+    if (!match || match[1].toLowerCase() !== "generativelanguage.googleapis.com") return false;
+    const pathname = (match[2] || "").replace(/\/+$/, "");
+    return pathname === "/v1beta/openai/chat/completions";
+  },
+
   // 是否需要 API Key（本地 Ollama / 自定义 不强制）
   _needKey() {
     const p = this.pref("provider", "deepseek");
@@ -1154,6 +1191,14 @@ var PaperOutline = {
     };
     const useJson = opts.json !== undefined ? opts.json : json;
     if (useJson) payload.response_format = { type: "json_object" }; // 多数服务商支持；不支持的预设里关掉
+    const reasoningEffort = this._normalizeReasoningEffort(opts.reasoningEffort);
+    if (
+      reasoningEffort !== "default" &&
+      this._isGeminiOpenAIEndpoint(url, model)
+    ) {
+      payload.reasoning_effort = reasoningEffort;
+      this.log("reasoning effort: " + reasoningEffort + ", model: " + model);
+    }
     const j = await this._post(url, headers, payload);
     return (
       (j.choices && j.choices[0] && j.choices[0].message && j.choices[0].message.content) ||
@@ -1173,16 +1218,24 @@ var PaperOutline = {
         timeout: 180000,
       });
     } catch (e) {
-      throw new Error(this._friendlyError(e));
+      throw new Error(this._friendlyError(e, { url, model: payload && payload.model }));
     }
     return JSON.parse(xhr.responseText);
   },
 
   // 把底层报错翻译成人话
-  _friendlyError(e) {
+  _friendlyError(e, context) {
     const status = (e && e.xmlhttp && e.xmlhttp.status) || (e && e.status) || 0;
     const body = ((e && e.xmlhttp && e.xmlhttp.responseText) || (e && e.message) || "").toString();
     const low = body.toLowerCase();
+    const isGeminiReasoningContext = this._isGeminiOpenAIEndpoint(
+      context && context.url,
+      context && context.model
+    );
+    if (isGeminiReasoningContext &&
+        (low.includes("reasoning_effort") || low.includes("unsupported value") ||
+         low.includes("invalid parameter")))
+      return "当前接口或模型不支持所选思考等级。请将思考等级改为‘使用模型默认值’，或检查是否使用 Gemini 官方 OpenAI 兼容接口。";
     if (status === 401 || low.includes("invalid api key") || low.includes("incorrect api key") ||
         low.includes("authentication") || low.includes("unauthorized"))
       return "API Key 无效，请检查是否填写正确（设置 → AI 接口 → API Key）。";
@@ -1333,7 +1386,14 @@ var PaperOutline = {
     const text = this._textForSummary(full, this.SUMMARY_MAX_CHARS);
     const sys = this.pref("summaryPrompt", this.SUMMARY_PROMPT);
     if (onText) onText("AI 总结中…");
-    const out = await this.callAI(sys, "论文标题：" + (item.getField("title") || "") + "\n\n论文全文：\n\n" + text, { json: false });
+    const out = await this.callAI(
+      sys,
+      "论文标题：" + (item.getField("title") || "") + "\n\n论文全文：\n\n" + text,
+      {
+        json: false,
+        reasoningEffort: this.pref("summaryReasoningEffort", "high"),
+      }
+    );
     const summary = String(out || "").trim();
     if (!summary) throw new Error("AI 未返回总结内容");
     return summary;

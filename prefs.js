@@ -6,6 +6,8 @@ pref("extensions.paperoutline.provider", "deepseek");
 pref("extensions.paperoutline.apiUrl", "");
 pref("extensions.paperoutline.apiKey", "");
 pref("extensions.paperoutline.model", "deepseek-chat");
+pref("extensions.paperoutline.outlineReasoningEffort", "low");
+pref("extensions.paperoutline.summaryReasoningEffort", "high");
 
 // —— 通用 ——
 pref("extensions.paperoutline.concurrency", 5);

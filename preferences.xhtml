@@ -96,6 +96,35 @@
           <html:input type="number" min="2000" max="200000" style="width:8em"
             preference="extensions.paperoutline.maxCharsPerChunk"/>
         </hbox>
+        <hbox align="center">
+          <label value="目录思考等级：" style="min-width:11em"/>
+          <menulist native="true" style="min-width:14em"
+            preference="extensions.paperoutline.outlineReasoningEffort">
+            <menupopup>
+              <menuitem value="default" label="使用模型默认值"/>
+              <menuitem value="minimal" label="minimal"/>
+              <menuitem value="low" label="low"/>
+              <menuitem value="medium" label="medium"/>
+              <menuitem value="high" label="high"/>
+            </menupopup>
+          </menulist>
+          <html:span class="po-hint" style="margin-left:8px;">推荐 low</html:span>
+        </hbox>
+        <hbox align="center">
+          <label value="整篇总结思考等级：" style="min-width:11em"/>
+          <menulist native="true" style="min-width:14em"
+            preference="extensions.paperoutline.summaryReasoningEffort">
+            <menupopup>
+              <menuitem value="default" label="使用模型默认值"/>
+              <menuitem value="minimal" label="minimal"/>
+              <menuitem value="low" label="low"/>
+              <menuitem value="medium" label="medium"/>
+              <menuitem value="high" label="high"/>
+            </menupopup>
+          </menulist>
+          <html:span class="po-hint" style="margin-left:8px;">整篇技术论文总结推荐 medium 或 high</html:span>
+        </hbox>
+        <html:div class="po-hint" style="max-width:46em;">目录推荐 low；整篇技术论文总结推荐 medium 或 high。仅 Gemini/OpenAI 兼容推理模型支持，其他服务商不受影响。</html:div>
         <checkbox native="true" label="把「目录」另存为子笔记（目录已常驻阅读器大纲栏，一般无需开启）"
           preference="extensions.paperoutline.saveAsNote"/>
         <checkbox native="true" label="去除文字空格：在阅读器工具栏显示「粉色小猫」图标，点它清理刚复制的文字"
