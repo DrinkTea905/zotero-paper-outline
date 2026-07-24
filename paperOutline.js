@@ -391,7 +391,7 @@ var PaperOutline = {
       const actions = mk("div", null, null, "po-empty-actions");
       const btn = mk("button", null, "📑 生成目录", "po-btn");
       btn.addEventListener("click", () => PaperOutline._doGenerate(doc, host, item, reader, false));
-      const testBtn = mk("button", null, "测试连接", "po-btn po-test-btn");
+      const testBtn = mk("button", null, "🔌 测试连接", "po-btn po-test-btn");
       const status = mk(
         "div",
         null,
@@ -492,7 +492,7 @@ var PaperOutline = {
       status.textContent = "连接失败：" + message;
     } finally {
       button.disabled = false;
-      button.textContent = "测试连接";
+      button.textContent = "🔌 测试连接";
     }
   },
 

@@ -225,15 +225,23 @@
 }
 
 .paper-outline-toggle-item {
-  display: block;
+  display: grid;
+  grid-template-columns: 28px minmax(0, 1fr);
+  align-items: start;
+  column-gap: 8px;
 }
 
-.paper-outline-toggle-item checkbox {
-  display: block;
-  min-height: 30px;
+.paper-outline-toggle-control {
+  align-self: start;
+  min-width: 24px;
+  min-height: 24px;
   margin: 0;
-  font-size: 13px;
-  line-height: 1.45;
+  padding: 0;
+}
+
+.paper-outline-toggle-copy {
+  min-width: 0;
+  padding-top: 1px;
 }
 
 .paper-outline-toggle-title {
@@ -244,7 +252,7 @@
 }
 
 .paper-outline-toggle-desc {
-  margin: 2px 0 0 27px;
+  margin: 4px 0 0;
   color: var(--paper-outline-muted);
   font-size: 11.5px;
   line-height: 1.55;
