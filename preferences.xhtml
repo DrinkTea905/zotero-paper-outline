@@ -1,213 +1,285 @@
 <vbox xmlns="http://www.mozilla.org/keymaster/gatekeeper/there.is.only.xul"
-      xmlns:html="http://www.w3.org/1999/xhtml">
+      xmlns:html="http://www.w3.org/1999/xhtml"
+      class="paper-outline-page"
+      onload="window.PaperOutlinePrefsUI &amp;&amp; window.PaperOutlinePrefsUI.init()">
+
   <groupbox>
-    <html:style>
-      .po-sec { font-size:15px; font-weight:700; color:#2e7dd1;
-                margin:16px 0 7px; padding-bottom:4px;
-                border-bottom:1px solid rgba(128,128,128,.25); }
-      .po-promptlabel { font-size:14px; font-weight:600; margin:12px 0 3px; }
-      .po-hint { color:#8a8a8a; font-size:12px; line-height:1.6; margin:2px 0 0; }
-      .po-help h3 { margin:14px 0 4px; font-size:13.5px; }
-    </html:style>
+    <html:header class="paper-outline-hero">
+      <html:p class="paper-outline-subtitle">
+        自动生成论文总结与带页码的层级目录。首次使用请先连接 AI 服务并完成测试。
+      </html:p>
+    </html:header>
+  </groupbox>
 
-    <label><html:h2 style="font-size:21px; margin:2px 0 2px;">Paper Outline —— AI 论文总结 + 目录</html:h2></label>
-    <html:div class="po-hint" style="margin-bottom:6px;">为论文自动生成「整篇总结（存笔记）」与「层级目录（阅读器大纲栏）」。</html:div>
-
-    <!-- ① AI 接口 -->
-    <html:div class="po-sec">① AI 接口</html:div>
-    <hbox align="center">
-      <label value="服务商：" style="min-width:7em"/>
-      <menulist native="true" preference="extensions.paperoutline.provider">
-        <menupopup>
-          <menuitem value="deepseek" label="DeepSeek（默认）"/>
-          <menuitem value="openai" label="OpenAI"/>
-          <menuitem value="moonshot" label="月之暗面 Kimi"/>
-          <menuitem value="zhipu" label="智谱 GLM"/>
-          <menuitem value="qwen" label="通义千问 Qwen"/>
-          <menuitem value="siliconflow" label="硅基流动 SiliconFlow"/>
-          <menuitem value="ollama" label="本地 Ollama（免 Key）"/>
-          <menuitem value="custom" label="自定义"/>
-        </menupopup>
-      </menulist>
-    </hbox>
-    <hbox align="center">
-      <label value="API Key：" style="min-width:7em"/>
-      <html:input type="password" style="width:32em"
-        placeholder="本地 Ollama / 自定义 可不填"
-        preference="extensions.paperoutline.apiKey"/>
-    </hbox>
-    <hbox align="center">
-      <label value="模型：" style="min-width:7em"/>
-      <html:input type="text" style="width:20em"
-        placeholder="留空＝用所选服务商默认模型"
-        preference="extensions.paperoutline.model"/>
-    </hbox>
-
-    <!-- ② 入库自动处理 -->
-    <html:div class="po-sec">② 入库自动处理</html:div>
-    <checkbox native="true" label="文献存入后，自动生成「整篇总结」并存为子笔记"
-      preference="extensions.paperoutline.autoSummary"/>
-    <checkbox native="true" label="文献存入后，自动生成「层级目录」（缓存在阅读器大纲栏，打开 PDF 即见）"
-      preference="extensions.paperoutline.autoOutline"/>
-    <html:div class="po-hint">关闭后改为手动（文库里右键文献）。详见下方「使用帮助」。</html:div>
-
-    <!-- ③ 提示词与目录层级 -->
-    <html:div class="po-sec">③ 提示词与目录层级</html:div>
-    <hbox align="center">
-      <label value="识别目录层级：" style="min-width:7em"/>
-      <menulist native="true" preference="extensions.paperoutline.maxLevel">
-        <menupopup>
-          <menuitem value="0" label="全部层级（默认）"/>
-          <menuitem value="1" label="只到一级标题"/>
-          <menuitem value="2" label="到二级标题"/>
-          <menuitem value="3" label="到三级标题"/>
-          <menuitem value="4" label="到四级标题"/>
-        </menupopup>
-      </menulist>
-    </hbox>
-
-    <html:div class="po-promptlabel">目录提示词</html:div>
-    <html:div class="po-hint">可直接修改；清空则恢复内置默认。</html:div>
-    <html:textarea rows="6" style="width:40em"
-      preference="extensions.paperoutline.prompt"></html:textarea>
-
-    <html:div class="po-promptlabel">总结提示词</html:div>
-    <html:div class="po-hint">整篇总结用；可直接修改；清空则恢复内置默认。</html:div>
-    <html:textarea rows="7" style="width:40em"
-      preference="extensions.paperoutline.summaryPrompt"></html:textarea>
-
-    <!-- ④ 高级选项（默认折叠；含自定义 API URL）-->
-    <html:details style="margin:16px 0 0;">
-      <html:summary class="po-sec" style="cursor:pointer;">④ 高级选项</html:summary>
-      <vbox style="margin-top:8px">
-        <hbox align="center">
-          <label value="API URL：" style="min-width:7em"/>
-          <html:input type="text" style="width:34em"
-            placeholder="留空＝用所选服务商默认地址；选「自定义」时必填"
-            preference="extensions.paperoutline.apiUrl"/>
-        </hbox>
-        <hbox align="center">
-          <label value="并发数：" style="min-width:7em"/>
-          <html:input type="number" min="1" max="50" style="width:6em"
-            preference="extensions.paperoutline.concurrency"/>
-        </hbox>
-        <hbox align="center">
-          <label value="每块字数：" style="min-width:7em"/>
-          <html:input type="number" min="2000" max="200000" style="width:8em"
-            preference="extensions.paperoutline.maxCharsPerChunk"/>
-        </hbox>
-        <checkbox native="true" label="把「目录」另存为子笔记（目录已常驻阅读器大纲栏，一般无需开启）"
-          preference="extensions.paperoutline.saveAsNote"/>
-        <checkbox native="true" label="去除文字空格：在阅读器工具栏显示「粉色小猫」图标，点它清理刚复制的文字"
-          preference="extensions.paperoutline.despaceButton"/>
-        <html:div class="po-hint">关掉则不显示该图标。详细用法见下方「使用帮助」。改动后请重开阅读器生效。</html:div>
-        <checkbox native="true" label="复制 PDF 文件：右键 / Ctrl+C 把 PDF 文件复制到剪贴板，可粘贴到文件夹、邮件、聊天"
-          preference="extensions.paperoutline.copyFile"/>
-        <html:div class="po-hint">关掉则恢复 Zotero 默认的 Ctrl+C（题录快速复制），并隐藏相关右键项。详细用法见下方「使用帮助」。</html:div>
-        <hbox align="center" style="margin-top:6px">
-          <button label="🗑 清空所有目录缓存"
-            oncommand="Zotero.PaperOutlineGPT &amp;&amp; Zotero.PaperOutlineGPT.clearAllCacheUI()"/>
-        </hbox>
-      </vbox>
-    </html:details>
-
-    <html:hr style="margin:16px 0; border:none; border-top:1px solid rgba(128,128,128,.25);"/>
-    <html:details>
-      <html:summary style="cursor:pointer; font-weight:bold; font-size:14px;">📖 使用帮助（新手必看）</html:summary>
-      <html:div class="po-help" style="font-size:13px; line-height:1.8; padding:10px 4px; max-width:46em;">
-
-        <html:p style="margin:0 0 10px;">本插件帮你用 AI 给论文自动生成
-          <html:b>整篇总结</html:b>（存为子笔记）与<html:b>层级目录 + 每节摘要</html:b>
-          （显示在阅读 PDF 时的左侧「大纲」栏，点一下就能跳到对应位置）。
-          新文献入库可<html:b>自动</html:b>生成，也可右键手动。</html:p>
-
-        <html:h3>第一次使用（2 步）</html:h3>
-        <html:ol style="margin:0; padding-left:1.4em;">
-          <html:li><html:b>填 API Key</html:b>：服务商默认 DeepSeek，把申请到的 Key 粘进上面「API Key」框
-            （申请方法见下）。用本地 Ollama 则免 Key。</html:li>
-          <html:li><html:b>照常加文献即可</html:b>：默认「入库自动处理」已开启，新文献（带 PDF）存入后会自动生成
-            总结笔记 + 目录；右下角会弹提示。也可双击 PDF，在左侧「大纲」栏点「📑 生成目录」。</html:li>
-        </html:ol>
-
-        <html:h3>如何申请 DeepSeek API Key（推荐，便宜好用）</html:h3>
-        <html:ol style="margin:0; padding-left:1.4em;">
-          <html:li>浏览器打开 <html:b>platform.deepseek.com</html:b>，用手机号注册并登录。</html:li>
-          <html:li>进入左侧 <html:b>「API keys」</html:b> → 点 <html:b>「创建 API key」</html:b>，
-            起个名字 → 复制生成的、以 <html:b>sk-</html:b> 开头的字符串（只显示一次，记得存好）。</html:li>
-          <html:li>到 <html:b>「充值 / 余额」</html:b> 充一点额度即可（如 ¥10；按用量计费，
-            生成一篇论文通常只要几分钱）。</html:li>
-          <html:li>回到本设置：服务商选 <html:b>DeepSeek</html:b>，把 sk- 那串粘进 <html:b>API Key</html:b>，完成。</html:li>
-        </html:ol>
-        <html:p style="margin:4px 0 0; color:#666;">想换别家也行：服务商下拉里有 OpenAI / Kimi / 智谱 /
-          通义 / 硅基流动 / 本地 Ollama，选了填对应的 Key 即可。</html:p>
-
-        <html:h3>入库自动处理（默认开启）</html:h3>
-        <html:ul style="margin:0; padding-left:1.4em;">
-          <html:li>新文献（带 PDF）存入 Zotero 后，<html:b>自动</html:b>生成整篇总结（子笔记）+ 层级目录。</html:li>
-          <html:li><html:b>批量导入</html:b>会自动排队、逐篇处理，不会一次性狂刷接口。</html:li>
-          <html:li><html:b>已生成过的会跳过</html:b>（已有总结笔记 / 已缓存目录），不重复花钱。</html:li>
-          <html:li>需要 PDF <html:b>有可提取文字</html:b>；纯扫描件（无文字层）会自动跳过。</html:li>
-          <html:li>不想自动？在上面「②入库自动处理」里各自取消勾选，改为下面的手动方式。</html:li>
-        </html:ul>
-
-        <html:h3>手动生成入口</html:h3>
-        <html:ul style="margin:0; padding-left:1.4em;">
-          <html:li><html:b>阅读时</html:b>：左侧「大纲」栏的「📑 生成目录」按钮。</html:li>
-          <html:li><html:b>右键</html:b>：文库里选中一篇或多篇 → 右键 →「📝 AI 整篇总结」（存笔记）
-            或「📑 AI 生成目录」。</html:li>
-        </html:ul>
-
-        <html:h3>小贴士</html:h3>
-        <html:ul style="margin:0; padding-left:1.4em;">
-          <html:li>目录会自动缓存，下次打开同一篇<html:b>秒显示</html:b>，不必重新生成。</html:li>
-          <html:li>对结果不满意？点目录底部「<html:b>↻ 重新生成</html:b>」重做一遍。</html:li>
-          <html:li>想要更细 / 更粗的目录？用上面「<html:b>识别目录层级</html:b>」调，然后重新生成。</html:li>
-          <html:li>想改总结的风格 / 详略？直接编辑上面的「<html:b>总结提示词</html:b>」。</html:li>
-        </html:ul>
-
-        <html:h3>去除文字空格（小崔定制）</html:h3>
-        <html:ul style="margin:0; padding-left:1.4em;">
-          <html:li>解决<html:b>中文 PDF 复制出来字与字之间全是空格</html:b>的老毛病（PDF 文字层按字形坐标存字，复制时被还原成空格）。</html:li>
-          <html:li><html:b>怎么用</html:b>：在 PDF 里选中文字 → 照常 <html:b>Ctrl+C</html:b> 复制 → 点阅读器工具栏<html:b>中间（标注工具左边）</html:b>的<html:b>粉色小猫</html:b>图标 → 再 <html:b>Ctrl+V</html:b> 粘贴，就是干净的了。</html:li>
-          <html:li>会去掉<html:b>中文之间</html:b>、以及<html:b>中文与英文/数字之间</html:b>的多余空格（中英之间也不留空格），并把 PDF 的换行并回成整段；<html:b>英文单词之间的正常空格保留</html:b>。</html:li>
-          <html:li><html:b>纯规则处理，不调用 AI、不联网</html:b>，瞬间完成。</html:li>
-          <html:li>不想要这个图标？到上面「④ 高级选项」里取消勾选「去除文字空格」，重开阅读器即可。</html:li>
-        </html:ul>
-
-        <html:h3>一键清理标注空格（小崔定制）</html:h3>
-        <html:ul style="margin:0; padding-left:1.4em;">
-          <html:li>把本 PDF <html:b>所有标注</html:b>里的空格<html:b>一次性</html:b>去掉，不用再一条条复制粘贴。</html:li>
-          <html:li><html:b>怎么用</html:b>：打开 PDF → 点阅读器左侧栏的<html:b>「注释」标签</html:b> → 标注列表<html:b>顶部</html:b>有个醒目的<html:b>「去除全部标注空格」</html:b>按钮（粉色小猫），点一下即可。</html:li>
-          <html:li>会清理<html:b>高亮 / 下划线</html:b>标注的文字，以及<html:b>任意标注的批注</html:b>；规则与上面一致（中文字间、中英之间不留空格，英文单词间正常空格保留）。</html:li>
-          <html:li><html:b>直接改存标注</html:b>（不只是剪贴板），<html:b>纯规则、不调 AI、不联网</html:b>；只会修改真正有多余空格的标注。</html:li>
-          <html:li>没有标注时按钮不显示；它和「去除文字空格」共用同一个开关（④ 高级选项）。</html:li>
-        </html:ul>
-
-        <html:h3>复制 PDF 文件</html:h3>
-        <html:ul style="margin:0; padding-left:1.4em;">
-          <html:li>把文献的 PDF <html:b>文件本身</html:b>复制到剪贴板，可直接<html:b>粘贴到文件夹 / 邮件 / 聊天窗口</html:b>（不是复制文字，是复制整个文件）。</html:li>
-          <html:li><html:b>在文库里</html:b>：选中文献（或其 PDF 附件）→ 按 <html:b>Ctrl+C</html:b>，或<html:b>右键 →「📋 复制 PDF 文件」</html:b>。</html:li>
-          <html:li><html:b>在阅读器顶部标签上</html:b>：<html:b>右键该标签 →「复制 PDF 文件」</html:b>。</html:li>
-          <html:li>到目标位置（资源管理器、邮件、微信等）<html:b>Ctrl+V</html:b> 粘贴，即得到该 PDF 文件。</html:li>
-          <html:li>可在「④ 高级选项 →『复制 PDF 文件』」总开关里关闭；关闭后 <html:b>Ctrl+C</html:b> 恢复 Zotero 默认（题录快速复制）。</html:li>
-        </html:ul>
-
-        <html:h3>常见疑问</html:h3>
-        <html:ul style="margin:0; padding-left:1.4em;">
-          <html:li><html:b>大纲栏里看不到面板？</html:b>
-            确认点的是阅读器左侧栏<html:b>最上面那排图标里的「大纲」</html:b>（不是缩略图 / 注释）。</html:li>
-          <html:li><html:b>点条目跳得不太准？</html:b>
-            少数 PDF（如部分知网 / 扫描件）读不出文字精确位置，会按比例估算，可能差一两页，属正常。</html:li>
-          <html:li><html:b>总结笔记在哪？</html:b>
-            在该文献条目下，作为<html:b>子笔记</html:b>显示（条目展开或在右侧笔记面板可见）。</html:li>
-          <html:li><html:b>要花钱吗？</html:b>
-            用云端服务商按其 API 计费（通常很便宜）；想完全免费可装本地 Ollama 选它。</html:li>
-        </html:ul>
-
-        <html:div style="margin:20px 0 4px; padding-top:12px; border-top:1px dashed #dcdcdc; text-align:center;">
-          <html:span style="font-family:'KaiTi','楷体','STKaiti',Georgia,serif; font-size:15px; font-style:italic; color:#8a6d3b; letter-spacing:1.5px;">by 独钓寒江雪 ＆ Claude</html:span>
+  <groupbox>
+    <html:section class="paper-outline-card" aria-labelledby="paper-outline-ai-heading">
+      <html:div class="paper-outline-card-header">
+        <html:div>
+          <html:h2 id="paper-outline-ai-heading" class="paper-outline-card-title">
+            <html:span class="paper-outline-step">1</html:span>连接 AI 服务
+          </html:h2>
+          <html:p class="paper-outline-card-desc">选择服务商并填写密钥，测试成功后即可生成内容。</html:p>
         </html:div>
       </html:div>
-    </html:details>
+
+      <html:div class="paper-outline-form-grid">
+        <html:label class="paper-outline-form-label" for="paper-outline-provider">服务商</html:label>
+        <menulist id="paper-outline-provider"
+                  native="true"
+                  preference="extensions.paperoutline.provider">
+          <menupopup>
+            <menuitem value="deepseek" label="DeepSeek（默认）"/>
+            <menuitem value="openai" label="OpenAI"/>
+            <menuitem value="moonshot" label="月之暗面 Kimi"/>
+            <menuitem value="zhipu" label="智谱 GLM"/>
+            <menuitem value="qwen" label="通义千问 Qwen"/>
+            <menuitem value="siliconflow" label="硅基流动 SiliconFlow"/>
+            <menuitem value="ollama" label="本地 Ollama（免 Key）"/>
+            <menuitem value="custom" label="自定义服务"/>
+          </menupopup>
+        </menulist>
+
+        <html:label class="paper-outline-form-label" for="paper-outline-api-key">API Key</html:label>
+        <html:div class="paper-outline-field-stack">
+          <html:input id="paper-outline-api-key"
+                      type="password"
+                      autocomplete="off"
+                      placeholder="粘贴服务商提供的 API Key"
+                      preference="extensions.paperoutline.apiKey"/>
+          <html:p id="paper-outline-key-hint" class="paper-outline-hint">仅保存在本机 Zotero 设置中。</html:p>
+        </html:div>
+
+        <html:label class="paper-outline-form-label" for="paper-outline-model">模型（可选）</html:label>
+        <html:div class="paper-outline-field-stack">
+          <html:input id="paper-outline-model"
+                      type="text"
+                      placeholder="留空使用服务商默认模型"
+                      preference="extensions.paperoutline.model"/>
+          <html:p id="paper-outline-model-hint" class="paper-outline-hint">留空时使用服务商默认模型。</html:p>
+        </html:div>
+      </html:div>
+
+      <html:details id="paper-outline-api-details" class="paper-outline-details">
+        <html:summary>自定义接口地址</html:summary>
+        <html:div class="paper-outline-details-body paper-outline-form-grid">
+          <html:label class="paper-outline-form-label" for="paper-outline-api-url">API URL</html:label>
+          <html:div class="paper-outline-field-stack">
+            <html:input id="paper-outline-api-url"
+                        type="url"
+                        placeholder="留空使用服务商默认地址"
+                        preference="extensions.paperoutline.apiUrl"/>
+            <html:p class="paper-outline-hint">
+              自定义服务必填；地址应指向 OpenAI 兼容的 chat/completions 接口。
+            </html:p>
+          </html:div>
+        </html:div>
+      </html:details>
+
+      <html:div class="paper-outline-action-row">
+        <button id="paper-outline-test-button"
+                label="测试连接"
+                oncommand="window.PaperOutlinePrefsUI.testConnection()"/>
+        <html:span class="paper-outline-cost-note">会发送一次极短请求，可能产生极少量费用。</html:span>
+      </html:div>
+      <html:div id="paper-outline-test-status"
+                class="paper-outline-status paper-outline-status-idle"
+                data-state="idle"
+                role="status"
+                aria-live="polite">尚未测试连接。</html:div>
+    </html:section>
+  </groupbox>
+
+  <groupbox>
+    <html:section class="paper-outline-card" aria-labelledby="paper-outline-auto-heading">
+      <html:div class="paper-outline-card-header">
+        <html:div>
+          <html:h2 id="paper-outline-auto-heading" class="paper-outline-card-title">
+            <html:span class="paper-outline-step">2</html:span>自动处理
+          </html:h2>
+          <html:p class="paper-outline-card-desc">新文献存入 Zotero 后自动执行；关闭后仍可通过右键手动生成。</html:p>
+        </html:div>
+      </html:div>
+
+      <html:div class="paper-outline-toggle-list">
+        <html:div class="paper-outline-toggle-item">
+          <checkbox native="true"
+                    label="自动生成论文总结"
+                    preference="extensions.paperoutline.autoSummary"/>
+          <html:p class="paper-outline-toggle-desc">保存为当前文献的子笔记，已有总结时自动跳过。</html:p>
+        </html:div>
+        <html:div class="paper-outline-toggle-item">
+          <checkbox native="true"
+                    label="自动生成层级目录"
+                    preference="extensions.paperoutline.autoOutline"/>
+          <html:p class="paper-outline-toggle-desc">缓存在阅读器大纲栏，打开 PDF 即可查看和跳转。</html:p>
+        </html:div>
+      </html:div>
+    </html:section>
+  </groupbox>
+
+  <groupbox>
+    <html:section class="paper-outline-card" aria-labelledby="paper-outline-output-heading">
+      <html:div class="paper-outline-card-header">
+        <html:div>
+          <html:h2 id="paper-outline-output-heading" class="paper-outline-card-title">
+            <html:span class="paper-outline-step">3</html:span>生成偏好
+          </html:h2>
+          <html:p class="paper-outline-card-desc">控制目录的详细程度；提示词模板仅在需要定制时修改。</html:p>
+        </html:div>
+      </html:div>
+
+      <html:div class="paper-outline-form-grid">
+        <html:label class="paper-outline-form-label" for="paper-outline-max-level">目录层级</html:label>
+        <menulist id="paper-outline-max-level"
+                  native="true"
+                  preference="extensions.paperoutline.maxLevel">
+          <menupopup>
+            <menuitem value="0" label="全部层级（默认）"/>
+            <menuitem value="1" label="只显示一级标题"/>
+            <menuitem value="2" label="显示到二级标题"/>
+            <menuitem value="3" label="显示到三级标题"/>
+            <menuitem value="4" label="显示到四级标题"/>
+          </menupopup>
+        </menulist>
+      </html:div>
+
+      <html:details class="paper-outline-details">
+        <html:summary>提示词模板</html:summary>
+        <html:div class="paper-outline-details-body">
+          <html:div class="paper-outline-prompt-toolbar">
+            <html:p class="paper-outline-hint">可以直接修改；需要重新开始时，可一键恢复目录与总结的内置提示词。</html:p>
+            <button id="paper-outline-reset-prompts"
+                    label="恢复默认"
+                    oncommand="window.PaperOutlinePrefsUI.restoreDefaultPrompts()"/>
+          </html:div>
+          <html:p id="paper-outline-prompt-reset-status"
+                  class="paper-outline-prompt-reset-status"
+                  role="status"
+                  aria-live="polite"></html:p>
+          <html:div class="paper-outline-prompt-block">
+            <html:label class="paper-outline-prompt-label" for="paper-outline-outline-prompt">目录提示词</html:label>
+            <html:textarea id="paper-outline-outline-prompt"
+                           class="paper-outline-prompt"
+                           rows="6"
+                           preference="extensions.paperoutline.prompt"></html:textarea>
+          </html:div>
+          <html:div class="paper-outline-prompt-block">
+            <html:label class="paper-outline-prompt-label" for="paper-outline-summary-prompt">总结提示词</html:label>
+            <html:textarea id="paper-outline-summary-prompt"
+                           class="paper-outline-prompt"
+                           rows="7"
+                           preference="extensions.paperoutline.summaryPrompt"></html:textarea>
+          </html:div>
+        </html:div>
+      </html:details>
+    </html:section>
+  </groupbox>
+
+  <groupbox>
+    <html:section class="paper-outline-card" aria-labelledby="paper-outline-tools-heading">
+      <html:div class="paper-outline-card-header">
+        <html:div>
+          <html:h2 id="paper-outline-tools-heading" class="paper-outline-card-title">实用工具</html:h2>
+          <html:p class="paper-outline-card-desc">这些功能不调用 AI，也不会产生接口费用。</html:p>
+        </html:div>
+      </html:div>
+
+      <html:div class="paper-outline-toggle-list">
+        <html:div class="paper-outline-toggle-item">
+          <checkbox native="true"
+                    label="显示“去除文字空格”按钮"
+                    preference="extensions.paperoutline.despaceButton"/>
+          <html:p class="paper-outline-toggle-desc">
+            在阅读器工具栏显示粉色小猫，一键清理中文 PDF 复制文字和标注中的多余空格；重开阅读器后生效。
+          </html:p>
+        </html:div>
+        <html:div class="paper-outline-toggle-item">
+          <checkbox native="true"
+                    label="启用“复制 PDF 文件”"
+                    preference="extensions.paperoutline.copyFile"/>
+          <html:p class="paper-outline-toggle-desc">
+            在文库中右键或按 Ctrl+C 复制 PDF 文件本身；关闭后恢复 Zotero 默认复制行为。
+          </html:p>
+        </html:div>
+      </html:div>
+    </html:section>
+  </groupbox>
+
+  <groupbox>
+    <html:section class="paper-outline-card" aria-labelledby="paper-outline-advanced-heading">
+      <html:details>
+        <html:summary id="paper-outline-advanced-heading" class="paper-outline-card-title">高级设置与数据</html:summary>
+        <html:div class="paper-outline-details-body">
+          <html:div class="paper-outline-form-grid">
+            <html:label class="paper-outline-form-label" for="paper-outline-concurrency">并发数</html:label>
+            <html:div class="paper-outline-field-stack">
+              <html:input id="paper-outline-concurrency"
+                          type="number"
+                          min="1"
+                          max="50"
+                          preference="extensions.paperoutline.concurrency"/>
+              <html:p class="paper-outline-hint">请求过于频繁时可适当调低，建议保持默认值 5。</html:p>
+            </html:div>
+
+            <html:label class="paper-outline-form-label" for="paper-outline-max-chars">每块字数</html:label>
+            <html:div class="paper-outline-field-stack">
+              <html:input id="paper-outline-max-chars"
+                          type="number"
+                          min="2000"
+                          max="200000"
+                          preference="extensions.paperoutline.maxCharsPerChunk"/>
+              <html:p class="paper-outline-hint">长文分块大小，建议保持默认值 40000。</html:p>
+            </html:div>
+          </html:div>
+
+          <html:div class="paper-outline-toggle-list" style="margin-top:16px;">
+            <html:div class="paper-outline-toggle-item">
+              <checkbox native="true"
+                        label="同时把目录保存为子笔记"
+                        preference="extensions.paperoutline.saveAsNote"/>
+              <html:p class="paper-outline-toggle-desc">目录已常驻阅读器大纲栏，一般无需开启。</html:p>
+            </html:div>
+          </html:div>
+
+          <html:div class="paper-outline-danger-row">
+            <html:div>
+              <html:p class="paper-outline-toggle-title">目录缓存</html:p>
+              <html:p class="paper-outline-toggle-desc">只删除插件生成的目录缓存，不删除 PDF、文献条目或总结笔记。</html:p>
+            </html:div>
+            <button label="清空目录缓存"
+                    oncommand="Zotero.PaperOutlineGPT &amp;&amp; Zotero.PaperOutlineGPT.clearAllCacheUI()"/>
+          </html:div>
+        </html:div>
+      </html:details>
+    </html:section>
+  </groupbox>
+
+  <groupbox>
+    <html:section class="paper-outline-card">
+      <html:details>
+        <html:summary class="paper-outline-card-title">使用帮助</html:summary>
+        <html:div class="paper-outline-help paper-outline-details-body">
+          <html:h3>第一次使用</html:h3>
+          <html:ol>
+            <html:li>选择 AI 服务商，粘贴 API Key；使用本地 Ollama 时无需 Key。</html:li>
+            <html:li>点击“测试连接”，看到绿色的“连接成功”后再开始生成。</html:li>
+            <html:li>保持“自动处理”开启，之后把带 PDF 的文献存入 Zotero 即可。</html:li>
+          </html:ol>
+
+          <html:h3>手动生成</html:h3>
+          <html:ul>
+            <html:li>文库：选中一篇或多篇文献，右键选择“AI 整篇总结”或“AI 生成目录”。</html:li>
+            <html:li>阅读器：打开 PDF，在左侧“大纲”栏点击“生成目录”。</html:li>
+          </html:ul>
+
+          <html:h3>没有生成结果？</html:h3>
+          <html:ul>
+            <html:li>先重新测试连接；错误信息会提示 Key、余额、模型名或接口地址问题。</html:li>
+            <html:li>PDF 需要有可提取的文字层；纯扫描件请先 OCR。</html:li>
+            <html:li>目录会自动缓存，重新打开同一篇 PDF 时无需重复生成。</html:li>
+          </html:ul>
+        </html:div>
+      </html:details>
+    </html:section>
   </groupbox>
 </vbox>

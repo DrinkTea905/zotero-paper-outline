@@ -7,7 +7,16 @@ $src = $PSScriptRoot
 $zip = Join-Path $src "paper-outline-gpt.zip"
 $xpi = Join-Path $src "paper-outline-gpt.xpi"
 
-$names = @("manifest.json","bootstrap.js","paperOutline.js","prefs.js","preferences.xhtml")
+$names = @(
+    "manifest.json",
+    "bootstrap.js",
+    "paperOutline.js",
+    "prefs.js",
+    "preferences.xhtml",
+    "preferences.js",
+    "preferences.css",
+    "icons"
+)
 $files = @()
 foreach ($n in $names) { $files += (Join-Path $src $n) }
 

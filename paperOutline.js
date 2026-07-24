@@ -386,14 +386,27 @@ var PaperOutline = {
       outline = outline.filter((s) => (parseInt(s.level, 10) || 1) <= maxLevel);
     }
 
-    // 空状态：仅一个生成按钮
+    // 空状态：生成目录 + 就地测试连接
     if (!outline || !outline.length) {
+      const actions = mk("div", null, null, "po-empty-actions");
       const btn = mk("button", null, "📑 生成目录", "po-btn");
       btn.addEventListener("click", () => PaperOutline._doGenerate(doc, host, item, reader, false));
-      box.appendChild(btn);
-      if (this._needKey() && !this.pref("apiKey", "")) {
-        box.appendChild(mk("div", "opacity:0.7;margin-top:8px;font-size:11px;", "（需先在 设置 → Paper Outline 填 API Key）"));
-      }
+      const testBtn = mk("button", null, "测试连接", "po-btn po-test-btn");
+      const status = mk(
+        "div",
+        null,
+        this._needKey() && !this.pref("apiKey", "")
+          ? "尚未填写 API Key，可先测试连接查看具体提示。"
+          : "生成前可先测试当前 AI 连接。",
+        "po-connection-status po-status-idle"
+      );
+      status.setAttribute("role", "status");
+      status.setAttribute("aria-live", "polite");
+      testBtn.addEventListener("click", () => PaperOutline._testReaderConnection(testBtn, status));
+      actions.appendChild(btn);
+      actions.appendChild(testBtn);
+      box.appendChild(actions);
+      box.appendChild(status);
       this._updateReaderPanelVisibility(doc);
       return;
     }
@@ -457,6 +470,29 @@ var PaperOutline = {
       this._renderReaderOutline(doc, host, item, reader);
     } catch (e) {
       this._showReaderError(doc, host, box, item, reader, e);
+    }
+  },
+
+  async _testReaderConnection(button, status) {
+    if (!button || !status || button.disabled) return;
+    button.disabled = true;
+    button.textContent = "正在测试…";
+    status.className = "po-connection-status po-status-testing";
+    status.textContent = "正在连接服务商并验证模型，请稍候…";
+    try {
+      const result = await this.testConnection();
+      status.className = "po-connection-status po-status-success";
+      status.textContent =
+        "连接成功 · " + result.label + " · " + result.model + " · " + result.elapsed + " ms";
+    } catch (e) {
+      const message = String((e && e.message) || e || "未知错误")
+        .replace(/^Error:\s*/i, "")
+        .trim();
+      status.className = "po-connection-status po-status-error";
+      status.textContent = "连接失败：" + message;
+    } finally {
+      button.disabled = false;
+      button.textContent = "测试连接";
     }
   },
 
@@ -595,6 +631,13 @@ var PaperOutline = {
       st.id = "paper-outline-style";
       st.textContent = [
         '#paper-outline-reader{font-family:-apple-system,"Segoe UI","Microsoft YaHei",system-ui,sans-serif;font-size:13px;line-height:1.65;color:var(--fill-primary,#1a1a1a);}',
+        '#paper-outline-reader .po-empty-actions{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:8px;width:100%;}',
+        '#paper-outline-reader .po-empty-actions .po-btn{width:100%;margin-top:4px;}',
+        '#paper-outline-reader .po-connection-status{margin-top:9px;padding:8px 9px;border:1px solid transparent;border-radius:6px;font-size:11.5px;line-height:1.5;overflow-wrap:anywhere;}',
+        '#paper-outline-reader .po-status-idle{background:var(--fill-quinary,rgba(0,0,0,.045));color:var(--fill-secondary,#777);}',
+        '#paper-outline-reader .po-status-testing{background:rgba(154,103,0,.10);color:#9a6700;}',
+        '#paper-outline-reader .po-status-success{background:rgba(32,131,60,.11);color:#20833c;}',
+        '#paper-outline-reader .po-status-error{background:rgba(198,61,61,.10);color:#b72f2f;}',
         '#paper-outline-reader .po-toolbar{display:flex;flex-wrap:wrap;gap:8px;margin:2px 2px 12px;}',
         '#paper-outline-reader .po-tbtn{display:inline-flex;align-items:center;gap:4px;font-size:12px;padding:4px 14px;border-radius:14px;border:1px solid var(--fill-quarternary,#d4d4d4);background:var(--fill-quinary,rgba(0,0,0,.035));color:var(--fill-secondary,#555);cursor:pointer;user-select:none;transition:background .12s,color .12s,border-color .12s;}',
         '#paper-outline-reader .po-tbtn:hover{background:var(--accent-blue,#2e7dd1);border-color:var(--accent-blue,#2e7dd1);color:#fff;}',
@@ -613,6 +656,7 @@ var PaperOutline = {
         '#paper-outline-reader .po-btn:hover{background:var(--fill-quinary,rgba(43,125,209,.12));}',
         '#paper-outline-reader .po-spin-wrap{display:flex;flex-direction:column;align-items:center;gap:10px;padding:26px 0;color:var(--fill-secondary,#777);font-size:12px;}',
         '#paper-outline-reader .po-spin{width:24px;height:24px;border:3px solid var(--fill-quinary,#ddd);border-top-color:var(--accent-blue,#2e7dd1);border-radius:50%;animation:po-rot .8s linear infinite;}',
+        '@media (prefers-color-scheme:dark){#paper-outline-reader .po-status-testing{color:#f0c15a;}#paper-outline-reader .po-status-success{color:#70d68a;}#paper-outline-reader .po-status-error{color:#ff9292;}}',
         '@keyframes po-rot{to{transform:rotate(360deg);}}',
       ].join("\n");
       (doc.head || doc.documentElement).appendChild(st);
@@ -1120,19 +1164,64 @@ var PaperOutline = {
     custom:      { label: "自定义（手填 URL / 模型）",   url: "",                                                                   model: "",                        json: false },
   },
 
-  _resolveAI() {
-    const p = this.pref("provider", "deepseek");
+  _resolveAI(overrides) {
+    overrides = overrides || {};
+    const has = (key) => Object.prototype.hasOwnProperty.call(overrides, key);
+    const p = has("provider") ? overrides.provider : this.pref("provider", "deepseek");
     const preset = this.PROVIDERS[p] || this.PROVIDERS.deepseek;
-    const url = (this.pref("apiUrl", "") || "").trim() || preset.url;
-    const model = (this.pref("model", "") || "").trim() || preset.model;
-    const key = (this.pref("apiKey", "") || "").trim();
-    return { url, model, key, json: preset.json };
+    const customUrl = has("url") ? overrides.url : this.pref("apiUrl", "");
+    const customModel = has("model") ? overrides.model : this.pref("model", "");
+    const customKey = has("key") ? overrides.key : this.pref("apiKey", "");
+    const url = (customUrl || "").trim() || preset.url;
+    const model = (customModel || "").trim() || preset.model;
+    const key = (customKey || "").trim();
+    return { provider: p, label: preset.label, url, model, key, json: preset.json };
   },
 
   // 是否需要 API Key（本地 Ollama / 自定义 不强制）
-  _needKey() {
-    const p = this.pref("provider", "deepseek");
+  _needKey(provider) {
+    const p = provider || this.pref("provider", "deepseek");
     return p !== "ollama" && p !== "custom";
+  },
+
+  // 设置页「测试连接」：走与正式生成相同的 chat/completions 请求链，仅发送极短消息。
+  async testConnection(overrides) {
+    const config = this._resolveAI(overrides);
+    if (!config.url) throw new Error("请先填写 API URL。");
+    if (!config.model) throw new Error("请先填写模型名称。");
+    if (this._needKey(config.provider) && !config.key) {
+      throw new Error("请先填写 API Key。");
+    }
+
+    const headers = {};
+    if (config.key) headers.Authorization = "Bearer " + config.key;
+    const startedAt = Date.now();
+    const result = await this._post(
+      config.url,
+      headers,
+      {
+        model: config.model,
+        stream: false,
+        messages: [{ role: "user", content: "Reply only with OK." }],
+        temperature: 0,
+        max_tokens: 8,
+      },
+      { timeout: 30000 }
+    );
+    const content =
+      (result.choices && result.choices[0] && result.choices[0].message &&
+        result.choices[0].message.content) ||
+      (result.message && result.message.content) ||
+      "";
+    if (!String(content).trim()) {
+      throw new Error("接口已连接，但没有返回可用内容。请检查模型名称是否正确。");
+    }
+    return {
+      provider: config.provider,
+      label: config.label,
+      model: config.model,
+      elapsed: Date.now() - startedAt,
+    };
   },
 
   // ── AI 调用：所有服务商统一走 OpenAI 兼容 /chat/completions ───────────────
@@ -1163,19 +1252,24 @@ var PaperOutline = {
   },
 
   // 统一的 HTTP POST（用 Zotero.HTTP.request，特权环境、不受网页 CORS 限制）
-  async _post(url, headers, payload) {
+  async _post(url, headers, payload, options) {
+    options = options || {};
     let xhr;
     try {
       xhr = await Zotero.HTTP.request("POST", url, {
         headers: Object.assign({ "Content-Type": "application/json" }, headers || {}),
         body: JSON.stringify(payload),
         responseType: "text",
-        timeout: 180000,
+        timeout: options.timeout || 180000,
       });
     } catch (e) {
       throw new Error(this._friendlyError(e));
     }
-    return JSON.parse(xhr.responseText);
+    try {
+      return JSON.parse(xhr.responseText);
+    } catch (e) {
+      throw new Error("接口已响应，但返回的不是有效 JSON。请检查 API URL 是否为 chat/completions 地址。");
+    }
   },
 
   // 把底层报错翻译成人话

@@ -4,8 +4,16 @@
 import os, zipfile, time
 
 SRC = os.path.dirname(os.path.abspath(__file__))
-FILES = ["manifest.json", "bootstrap.js", "paperOutline.js", "prefs.js", "preferences.xhtml",
-         "icons/icon.png"]
+FILES = [
+    "manifest.json",
+    "bootstrap.js",
+    "paperOutline.js",
+    "prefs.js",
+    "preferences.xhtml",
+    "preferences.js",
+    "preferences.css",
+    "icons/icon.png",
+]
 OUT = os.path.join(SRC, "paper-outline-gpt.xpi")
 
 if os.path.exists(OUT):
