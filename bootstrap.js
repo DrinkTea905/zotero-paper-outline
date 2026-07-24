@@ -25,6 +25,8 @@ async function startup({ id, version, rootURI }) {
       pluginID: id,
       src: rootURI + "preferences.xhtml",
       label: "Paper Outline",
+      scripts: [rootURI + "preferences.js"],
+      stylesheets: [rootURI + "preferences.css"],
     });
   } catch (e) {
     PaperOutline.log("PreferencePanes.register 失败（不影响主功能）: " + e);

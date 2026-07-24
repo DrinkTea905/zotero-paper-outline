@@ -5,7 +5,7 @@ pref("extensions.paperoutline.provider", "deepseek");
 // apiUrl / model 留空 = 用所选服务商默认；自定义服务商需填 apiUrl。
 pref("extensions.paperoutline.apiUrl", "");
 pref("extensions.paperoutline.apiKey", "");
-pref("extensions.paperoutline.model", "deepseek-chat");
+pref("extensions.paperoutline.model", "");
 
 // —— 通用 ——
 pref("extensions.paperoutline.concurrency", 5);
