@@ -53,9 +53,9 @@
         <html:div class="paper-outline-field-stack">
           <html:input id="paper-outline-model"
                       type="text"
-                      placeholder="留空使用服务商默认模型"
+                      placeholder="留空自动选择当前可用模型"
                       preference="extensions.paperoutline.model"/>
-          <html:p id="paper-outline-model-hint" class="paper-outline-hint">留空时使用服务商默认模型。</html:p>
+          <html:p id="paper-outline-model-hint" class="paper-outline-hint">留空时自动查询服务商当前可用模型；查询失败时才使用内置兜底。</html:p>
         </html:div>
       </html:div>
 
@@ -221,7 +221,7 @@
                         id="paper-outline-copy-file-title"
                         class="paper-outline-toggle-title">启用“复制 PDF 文件”</html:label>
             <html:p class="paper-outline-toggle-desc">
-              在文库中单选一篇文献，右键或按 Ctrl+C 复制 PDF 文件本身；关闭后恢复 Zotero 默认复制行为。
+              在文库中单选或多选文献，右键或按 Ctrl+C 复制 PDF 文件本身；Windows 支持一次粘贴多份文件。
             </html:p>
           </html:div>
         </html:div>

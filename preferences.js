@@ -98,8 +98,8 @@
 
       if (modelHint) {
         modelHint.textContent = preset.model
-          ? "留空时使用默认模型：" + preset.model
-          : "自定义服务需要填写模型名称。";
+          ? "留空时自动查询服务商当前可用模型；查询失败时使用：" + preset.model
+          : "如接口支持 /models，可留空自动查询；否则请填写模型名称。";
       }
       if (keyHint) {
         keyHint.textContent =

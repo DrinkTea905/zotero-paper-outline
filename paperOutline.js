@@ -1177,6 +1177,17 @@ var PaperOutline = {
     custom:      { label: "自定义（手填 URL / 模型）",   url: "",                                                                   model: "",                        json: false },
   },
 
+  MODEL_PREFERENCES: {
+    deepseek:    [/flash/i, /chat/i, /deepseek/i, /pro/i],
+    openai:      [/^gpt-4o-mini$/i, /^gpt-4\.1-mini$/i, /^gpt-4o$/i, /^gpt-4\.1$/i, /^gpt-/i],
+    moonshot:    [/moonshot.*8k/i, /moonshot/i, /kimi/i],
+    zhipu:       [/glm-4-flash/i, /glm-4/i, /glm/i],
+    qwen:        [/qwen-plus/i, /qwen.*turbo/i, /qwen/i],
+    siliconflow: [/deepseek.*v3/i, /deepseek/i, /qwen/i],
+    ollama:      [/qwen/i, /llama/i, /mistral/i],
+    custom:      [],
+  },
+
   _resolveAI(overrides) {
     overrides = overrides || {};
     const has = (key) => Object.prototype.hasOwnProperty.call(overrides, key);
@@ -1188,7 +1199,96 @@ var PaperOutline = {
     const url = (customUrl || "").trim() || preset.url;
     const model = (customModel || "").trim() || preset.model;
     const key = (customKey || "").trim();
-    return { provider: p, label: preset.label, url, model, key, json: preset.json };
+    return {
+      provider: p,
+      label: preset.label,
+      url,
+      model,
+      key,
+      json: preset.json,
+      modelIsCustom: !!(customModel || "").trim(),
+    };
+  },
+
+  _modelsURL(chatURL) {
+    const clean = String(chatURL || "").trim().split(/[?#]/)[0].replace(/\/+$/, "");
+    if (!clean) return "";
+    if (/\/chat\/completions$/i.test(clean)) {
+      return clean.replace(/\/chat\/completions$/i, "/models");
+    }
+    return "";
+  },
+
+  _chooseAvailableModel(provider, ids, fallback) {
+    const models = (ids || [])
+      .map((id) => String(id || "").trim())
+      .filter(Boolean);
+    if (!models.length) return fallback || "";
+    if (fallback && models.includes(fallback)) return fallback;
+
+    const usable = models.filter((id) =>
+      !/(embedding|rerank|whisper|speech|tts|moderation|image|dall-e)/i.test(id)
+    );
+    const candidates = usable.length ? usable : models;
+    const preferences = this.MODEL_PREFERENCES[provider] || [];
+    for (const pattern of preferences) {
+      const match = candidates.find((id) => pattern.test(id));
+      if (match) return match;
+    }
+    return candidates[0];
+  },
+
+  async _discoverModel(config, force) {
+    if (!config || config.modelIsCustom) return config && config.model;
+    const modelsURL = this._modelsURL(config.url);
+    if (!modelsURL) return config.model;
+
+    this._modelDiscoveryCache = this._modelDiscoveryCache || new Map();
+    const cacheKey = config.provider + "|" + modelsURL;
+    if (!force && this._modelDiscoveryCache.has(cacheKey)) {
+      return this._modelDiscoveryCache.get(cacheKey);
+    }
+
+    try {
+      const headers = {};
+      if (config.key) headers.Authorization = "Bearer " + config.key;
+      const xhr = await Zotero.HTTP.request("GET", modelsURL, {
+        headers,
+        responseType: "text",
+        timeout: 20000,
+      });
+      const result = JSON.parse(xhr.responseText);
+      const ids = Array.isArray(result.data)
+        ? result.data.map((item) => item && item.id).filter(Boolean)
+        : [];
+      const selected = this._chooseAvailableModel(config.provider, ids, config.model);
+      if (selected) {
+        this._modelDiscoveryCache.set(cacheKey, selected);
+        return selected;
+      }
+    } catch (e) {
+      this.log("model discovery failed, using fallback: " + e);
+    }
+    return config.model;
+  },
+
+  async _prepareAI(overrides, forceDiscovery) {
+    const config = this._resolveAI(overrides);
+    if (!config.modelIsCustom) {
+      config.model = await this._discoverModel(config, !!forceDiscovery);
+    }
+    return config;
+  },
+
+  _isModelError(error) {
+    const status = (error && error.status) || 0;
+    const text = String(
+      (error && error.body) || (error && error.message) || error || ""
+    ).toLowerCase();
+    return (
+      (status === 400 || status === 404 || text.includes("model")) &&
+      (text.includes("model") || text.includes("supported api"))
+    );
   },
 
   // 是否需要 API Key（本地 Ollama / 自定义 不强制）
@@ -1199,9 +1299,9 @@ var PaperOutline = {
 
   // 设置页「测试连接」：走与正式生成相同的 chat/completions 请求链，仅发送极短消息。
   async testConnection(overrides) {
-    const config = this._resolveAI(overrides);
+    const config = await this._prepareAI(overrides, true);
     if (!config.url) throw new Error("请先填写 API URL。");
-    if (!config.model) throw new Error("请先填写模型名称。");
+    if (!config.model) throw new Error("没有发现可用模型，请填写模型名称后重试。");
     if (this._needKey(config.provider) && !config.key) {
       throw new Error("请先填写 API Key。");
     }
@@ -1209,25 +1309,27 @@ var PaperOutline = {
     const headers = {};
     if (config.key) headers.Authorization = "Bearer " + config.key;
     const startedAt = Date.now();
+    const payload = {
+      model: config.model,
+      stream: false,
+      messages: [{ role: "user", content: "Reply only with OK." }],
+      temperature: 0,
+      max_tokens: 32,
+    };
+    // DeepSeek V4 默认开启思考模式；短测试若不关闭，输出额度可能全被 reasoning_content 占用。
+    if (config.provider === "deepseek") {
+      payload.thinking = { type: "disabled" };
+    }
     const result = await this._post(
       config.url,
       headers,
-      {
-        model: config.model,
-        stream: false,
-        messages: [{ role: "user", content: "Reply only with OK." }],
-        temperature: 0,
-        max_tokens: 8,
-      },
+      payload,
       { timeout: 30000 }
     );
-    const content =
-      (result.choices && result.choices[0] && result.choices[0].message &&
-        result.choices[0].message.content) ||
-      (result.message && result.message.content) ||
-      "";
-    if (!String(content).trim()) {
-      throw new Error("接口已连接，但没有返回可用内容。请检查模型名称是否正确。");
+    const choice = result.choices && result.choices[0];
+    const message = (choice && choice.message) || result.message;
+    if (!message || typeof message !== "object") {
+      throw new Error("接口已连接，但返回格式不是标准的对话结果。请检查接口地址是否兼容 chat/completions。");
     }
     return {
       provider: config.provider,
@@ -1241,7 +1343,8 @@ var PaperOutline = {
   // opts.json：是否要求 JSON 输出（目录=true；整篇总结=false，要纯文本）。不传则按服务商预设。
   async callAI(systemPrompt, userPrompt, opts) {
     opts = opts || {};
-    const { url, model, key, json } = this._resolveAI();
+    let config = await this._prepareAI();
+    let { url, model, key, json } = config;
     if (!url) throw new Error("未配置 API URL（自定义服务商需在设置里填写）");
     const headers = {};
     if (key) headers.Authorization = "Bearer " + key;
@@ -1256,7 +1359,18 @@ var PaperOutline = {
     };
     const useJson = opts.json !== undefined ? opts.json : json;
     if (useJson) payload.response_format = { type: "json_object" }; // 多数服务商支持；不支持的预设里关掉
-    const j = await this._post(url, headers, payload);
+    let j;
+    try {
+      j = await this._post(url, headers, payload);
+    } catch (error) {
+      if (config.modelIsCustom || !this._isModelError(error)) throw error;
+      const refreshed = await this._prepareAI(null, true);
+      if (!refreshed.model || refreshed.model === model) throw error;
+      config = refreshed;
+      model = refreshed.model;
+      payload.model = model;
+      j = await this._post(url, headers, payload);
+    }
     return (
       (j.choices && j.choices[0] && j.choices[0].message && j.choices[0].message.content) ||
       (j.message && j.message.content) ||
@@ -1276,7 +1390,10 @@ var PaperOutline = {
         timeout: options.timeout || 180000,
       });
     } catch (e) {
-      throw new Error(this._friendlyError(e));
+      const error = new Error(this._friendlyError(e));
+      error.status = (e && e.xmlhttp && e.xmlhttp.status) || (e && e.status) || 0;
+      error.body = ((e && e.xmlhttp && e.xmlhttp.responseText) || (e && e.message) || "").toString();
+      throw error;
     }
     try {
       return JSON.parse(xhr.responseText);
@@ -1290,9 +1407,10 @@ var PaperOutline = {
     const status = (e && e.xmlhttp && e.xmlhttp.status) || (e && e.status) || 0;
     const body = ((e && e.xmlhttp && e.xmlhttp.responseText) || (e && e.message) || "").toString();
     const low = body.toLowerCase();
-    if (low.includes("supported api model names") &&
-        (low.includes("deepseek-v4-flash") || low.includes("deepseek-v4-pro")))
-      return "DeepSeek 已停止支持旧模型 deepseek-chat。请把模型留空使用 deepseek-v4-flash（推荐），或填写 deepseek-v4-pro。";
+    if (low.includes("supported api model names") ||
+        low.includes("model not found") ||
+        low.includes("no such model"))
+      return "服务商已调整可用模型。请把“模型”栏留空后重新测试，插件会自动查询当前可用模型。";
     if (status === 401 || low.includes("invalid api key") || low.includes("incorrect api key") ||
         low.includes("authentication") || low.includes("unauthorized"))
       return "API Key 无效，请检查是否填写正确（设置 → AI 接口 → API Key）。";
@@ -2067,6 +2185,152 @@ var PaperOutline = {
       .setData(trans, null, Ci.nsIClipboard.kGlobalClipboard);
   },
 
+  _buildFileDropBytes(paths) {
+    const DROPFILES_SIZE = 20;
+    const charCount = paths.reduce((sum, path) => sum + path.length + 1, 1);
+    const bytes = new Uint8Array(DROPFILES_SIZE + charCount * 2);
+    // DROPFILES.pFiles = 20；fWide = TRUE，其余字段保持 0。
+    bytes[0] = DROPFILES_SIZE;
+    bytes[16] = 1;
+    let offset = DROPFILES_SIZE;
+    for (const path of paths) {
+      for (let i = 0; i < path.length; i++) {
+        const code = path.charCodeAt(i);
+        bytes[offset++] = code & 0xff;
+        bytes[offset++] = (code >>> 8) & 0xff;
+      }
+      offset += 2; // 每条路径的 UTF-16 结尾 \0
+    }
+    // Uint8Array 初始化为 0，末尾会多保留一个 UTF-16 \0，组成双零结尾。
+    return bytes;
+  },
+
+  // Windows 多文件剪贴板必须写入一个完整的 CF_HDROP 数据块。
+  // 直接调用 Win32 剪贴板 API，不依赖 PowerShell、外部程序或本地安全策略。
+  async _putFilesOnClipboardWindows(paths) {
+    if (!Zotero.isWin) throw new Error("当前系统暂不支持一次复制多份文件");
+    const unique = [];
+    const seen = new Set();
+    for (const path of paths || []) {
+      const value = String(path || "").trim();
+      const key = value.toLowerCase();
+      if (value && !seen.has(key)) {
+        seen.add(key);
+        unique.push(value);
+      }
+    }
+    if (unique.length < 2) throw new Error("多文件剪贴板至少需要两份文件");
+    if (unique.length > 100) throw new Error("一次最多复制 100 份文件");
+
+    let ctypes;
+    try {
+      ({ ctypes } = ChromeUtils.importESModule("resource://gre/modules/ctypes.sys.mjs"));
+    } catch (e) {
+      ({ ctypes } = ChromeUtils.import("resource://gre/modules/ctypes.jsm"));
+    }
+
+    const kernel32 = ctypes.open("kernel32.dll");
+    const user32 = ctypes.open("user32.dll");
+    const shell32 = ctypes.open("shell32.dll");
+    let hGlobal = null;
+    let clipboardOwnsMemory = false;
+    let GlobalFree = null;
+    try {
+      const GlobalAlloc = kernel32.declare(
+        "GlobalAlloc", ctypes.winapi_abi,
+        ctypes.voidptr_t, ctypes.uint32_t, ctypes.size_t
+      );
+      const GlobalLock = kernel32.declare(
+        "GlobalLock", ctypes.winapi_abi,
+        ctypes.voidptr_t, ctypes.voidptr_t
+      );
+      const GlobalUnlock = kernel32.declare(
+        "GlobalUnlock", ctypes.winapi_abi,
+        ctypes.int32_t, ctypes.voidptr_t
+      );
+      GlobalFree = kernel32.declare(
+        "GlobalFree", ctypes.winapi_abi,
+        ctypes.voidptr_t, ctypes.voidptr_t
+      );
+      const OpenClipboard = user32.declare(
+        "OpenClipboard", ctypes.winapi_abi,
+        ctypes.int32_t, ctypes.voidptr_t
+      );
+      const EmptyClipboard = user32.declare(
+        "EmptyClipboard", ctypes.winapi_abi,
+        ctypes.int32_t
+      );
+      const SetClipboardData = user32.declare(
+        "SetClipboardData", ctypes.winapi_abi,
+        ctypes.voidptr_t, ctypes.uint32_t, ctypes.voidptr_t
+      );
+      const GetClipboardData = user32.declare(
+        "GetClipboardData", ctypes.winapi_abi,
+        ctypes.voidptr_t, ctypes.uint32_t
+      );
+      const CloseClipboard = user32.declare(
+        "CloseClipboard", ctypes.winapi_abi,
+        ctypes.int32_t
+      );
+      const DragQueryFileW = shell32.declare(
+        "DragQueryFileW", ctypes.winapi_abi,
+        ctypes.uint32_t,
+        ctypes.voidptr_t,
+        ctypes.uint32_t,
+        ctypes.char16_t.ptr,
+        ctypes.uint32_t
+      );
+
+      const dropBytes = this._buildFileDropBytes(unique);
+      const totalBytes = dropBytes.length;
+      // GHND = GMEM_MOVEABLE | GMEM_ZEROINIT；SetClipboardData 成功后内存所有权交给系统。
+      hGlobal = GlobalAlloc(0x0042, totalBytes);
+      if (hGlobal.isNull()) throw new Error("无法分配 Windows 剪贴板内存");
+      const locked = GlobalLock(hGlobal);
+      if (locked.isNull()) throw new Error("无法写入 Windows 剪贴板内存");
+      try {
+        const BufferType = ctypes.uint8_t.array(totalBytes);
+        const buffer = ctypes.cast(locked, BufferType.ptr).contents;
+        for (let i = 0; i < totalBytes; i++) buffer[i] = dropBytes[i];
+      } finally {
+        GlobalUnlock(hGlobal);
+      }
+
+      const CF_HDROP = 15;
+      let opened = false;
+      for (let attempt = 0; attempt < 10; attempt++) {
+        if (OpenClipboard(null)) {
+          opened = true;
+          break;
+        }
+        await Zotero.Promise.delay(50 + attempt * 40);
+      }
+      if (!opened) throw new Error("剪贴板正被其他程序占用，请稍后重试");
+      try {
+        if (!EmptyClipboard()) throw new Error("无法清空 Windows 剪贴板");
+        const stored = SetClipboardData(CF_HDROP, hGlobal);
+        if (stored.isNull()) throw new Error("Windows 拒绝写入多文件剪贴板");
+        clipboardOwnsMemory = true;
+        const actual = GetClipboardData(CF_HDROP);
+        const count = actual.isNull()
+          ? 0
+          : Number(DragQueryFileW(actual, 0xffffffff, null, 0));
+        if (count !== unique.length) {
+          throw new Error("剪贴板校验失败：应写入 " + unique.length + " 份，实际为 " + count + " 份");
+        }
+      } finally {
+        CloseClipboard();
+      }
+    } finally {
+      if (hGlobal && !hGlobal.isNull() && !clipboardOwnsMemory) {
+        try { if (GlobalFree) GlobalFree(hGlobal); } catch (e) {}
+      }
+      try { shell32.close(); } catch (e) {}
+      try { user32.close(); } catch (e) {}
+      try { kernel32.close(); } catch (e) {}
+    }
+  },
+
   _fileBaseName(path) {
     try { return Zotero.File.pathToFile(path).leafName; } catch (e) { return "PDF"; }
   },
@@ -2089,17 +2353,63 @@ var PaperOutline = {
     }
   },
 
-  // 文库右键菜单调用：内置剪贴板接口仅支持单文件；多选时明确提示，不静默只复制第一篇
-  copySelectedFile() {
+  async copyAttachmentFiles(items) {
+    try {
+      const paths = [];
+      let skipped = 0;
+      for (const item of items || []) {
+        const att = await this._resolveFileAttachment(item);
+        if (!att) { skipped++; continue; }
+        let path = null;
+        try { path = att.getFilePath(); } catch (e) {}
+        if (!path) { try { path = await att.getFilePathAsync(); } catch (e) {} }
+        if (!path) { skipped++; continue; }
+        try {
+          if (!(await IOUtils.exists(path))) { skipped++; continue; }
+        } catch (e) {}
+        paths.push(path);
+      }
+
+      const uniquePaths = [];
+      const seen = new Set();
+      for (const path of paths) {
+        const key = Zotero.isWin ? String(path).toLowerCase() : String(path);
+        if (!seen.has(key)) {
+          seen.add(key);
+          uniquePaths.push(path);
+        }
+      }
+      if (!uniquePaths.length) {
+        this._cfToast("没有可复制的文件", "所选条目没有已下载到本地的 PDF/文件附件");
+        return;
+      }
+      if (uniquePaths.length === 1) {
+        this._putFileOnClipboard(uniquePaths[0]);
+        const detail = this._fileBaseName(uniquePaths[0]) +
+          (skipped ? " · 另有 " + skipped + " 篇没有本地文件" : "") +
+          " · 可粘贴到文件夹/邮件/聊天";
+        this._cfToast("已复制 1 份文件", detail);
+        return;
+      }
+
+      await this._putFilesOnClipboardWindows(uniquePaths);
+      const detail = uniquePaths.length + " 份文件已写入剪贴板" +
+        (skipped ? " · 跳过 " + skipped + " 篇无本地文件的条目" : "") +
+        " · 可一次粘贴";
+      this._cfToast("批量复制成功", detail);
+    } catch (e) {
+      this.log("copyAttachmentFiles: " + e);
+      this._cfToast("批量复制失败", String((e && e.message) || e));
+    }
+  },
+
+  // 文库右键菜单调用：单选和多选共用同一条复制流程
+  async copySelectedFile() {
     try {
       const zp = Zotero.getActiveZoteroPane && Zotero.getActiveZoteroPane();
       const items = (zp && zp.getSelectedItems) ? zp.getSelectedItems() : [];
       if (!items || !items.length) { this._cfToast("未选中条目", "请先选中文献或其 PDF 附件"); return; }
-      if (items.length > 1) {
-        this._cfToast("暂不支持一次复制多篇", "请单选一篇文献；多选时 Zotero 的内置剪贴板无法可靠写入多份文件");
-        return;
-      }
-      this.copyAttachmentFile(items[0]);
+      await this.copyAttachmentFiles(items);
     } catch (e) { this.log("copySelectedFile: " + e); }
   },
 
@@ -2134,14 +2444,14 @@ var PaperOutline = {
       const zp = win.ZoteroPane || (Zotero.getActiveZoteroPane && Zotero.getActiveZoteroPane());
       if (!zp || !zp.getSelectedItems) return;
       const items = zp.getSelectedItems();
-      if (!items || items.length !== 1) return; // 仅单选时接管，多选交回 Zotero 默认
-      const it = items[0];
-      let target = null;
-      if (it.isFileAttachment && it.isFileAttachment()) target = it;
-      else if (it.isRegularItem && it.isRegularItem() && PaperOutline._itemHasFileAttachment(it)) target = it;
-      if (!target) return; // 没有可复制的文件 → 放行 Zotero 默认
+      if (!items || !items.length) return;
+      const hasFile = items.some((it) =>
+        (it.isFileAttachment && it.isFileAttachment()) ||
+        (it.isRegularItem && it.isRegularItem() && PaperOutline._itemHasFileAttachment(it))
+      );
+      if (!hasFile) return; // 没有可复制的文件 → 放行 Zotero 默认
       e.preventDefault(); e.stopPropagation();
-      PaperOutline.copyAttachmentFile(target);
+      PaperOutline.copyAttachmentFiles(items);
     } catch (err) { PaperOutline.log("_onLibraryCopyKey: " + err); }
   },
 
