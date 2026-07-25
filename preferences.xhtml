@@ -102,24 +102,26 @@
 
       <html:div class="paper-outline-toggle-list">
         <html:div class="paper-outline-toggle-item">
-          <checkbox id="paper-outline-auto-summary"
-                    class="paper-outline-toggle-control"
-                    native="true"
-                    aria-labelledby="paper-outline-auto-summary-title"
-                    preference="extensions.paperoutline.autoSummary"/>
+          <html:input id="paper-outline-auto-summary"
+                      class="paper-outline-toggle-control"
+                      type="checkbox"
+                      aria-labelledby="paper-outline-auto-summary-title"/>
           <html:div class="paper-outline-toggle-copy">
-            <html:p id="paper-outline-auto-summary-title" class="paper-outline-toggle-title">自动生成论文总结</html:p>
+            <html:label for="paper-outline-auto-summary"
+                        id="paper-outline-auto-summary-title"
+                        class="paper-outline-toggle-title">自动生成论文总结</html:label>
             <html:p class="paper-outline-toggle-desc">保存为当前文献的子笔记，已有总结时自动跳过。</html:p>
           </html:div>
         </html:div>
         <html:div class="paper-outline-toggle-item">
-          <checkbox id="paper-outline-auto-outline"
-                    class="paper-outline-toggle-control"
-                    native="true"
-                    aria-labelledby="paper-outline-auto-outline-title"
-                    preference="extensions.paperoutline.autoOutline"/>
+          <html:input id="paper-outline-auto-outline"
+                      class="paper-outline-toggle-control"
+                      type="checkbox"
+                      aria-labelledby="paper-outline-auto-outline-title"/>
           <html:div class="paper-outline-toggle-copy">
-            <html:p id="paper-outline-auto-outline-title" class="paper-outline-toggle-title">自动生成层级目录</html:p>
+            <html:label for="paper-outline-auto-outline"
+                        id="paper-outline-auto-outline-title"
+                        class="paper-outline-toggle-title">自动生成层级目录</html:label>
             <html:p class="paper-outline-toggle-desc">缓存在阅读器大纲栏，打开 PDF 即可查看和跳转。</html:p>
           </html:div>
         </html:div>
@@ -196,28 +198,30 @@
 
       <html:div class="paper-outline-toggle-list">
         <html:div class="paper-outline-toggle-item">
-          <checkbox id="paper-outline-despace-button"
-                    class="paper-outline-toggle-control"
-                    native="true"
-                    aria-labelledby="paper-outline-despace-button-title"
-                    preference="extensions.paperoutline.despaceButton"/>
+          <html:input id="paper-outline-despace-button"
+                      class="paper-outline-toggle-control"
+                      type="checkbox"
+                      aria-labelledby="paper-outline-despace-button-title"/>
           <html:div class="paper-outline-toggle-copy">
-            <html:p id="paper-outline-despace-button-title" class="paper-outline-toggle-title">显示“去除文字空格”按钮</html:p>
+            <html:label for="paper-outline-despace-button"
+                        id="paper-outline-despace-button-title"
+                        class="paper-outline-toggle-title">显示“去除文字空格”按钮</html:label>
             <html:p class="paper-outline-toggle-desc">
               在阅读器工具栏显示粉色小猫，一键清理中文 PDF 复制文字和标注中的多余空格；重开阅读器后生效。
             </html:p>
           </html:div>
         </html:div>
         <html:div class="paper-outline-toggle-item">
-          <checkbox id="paper-outline-copy-file"
-                    class="paper-outline-toggle-control"
-                    native="true"
-                    aria-labelledby="paper-outline-copy-file-title"
-                    preference="extensions.paperoutline.copyFile"/>
+          <html:input id="paper-outline-copy-file"
+                      class="paper-outline-toggle-control"
+                      type="checkbox"
+                      aria-labelledby="paper-outline-copy-file-title"/>
           <html:div class="paper-outline-toggle-copy">
-            <html:p id="paper-outline-copy-file-title" class="paper-outline-toggle-title">启用“复制 PDF 文件”</html:p>
+            <html:label for="paper-outline-copy-file"
+                        id="paper-outline-copy-file-title"
+                        class="paper-outline-toggle-title">启用“复制 PDF 文件”</html:label>
             <html:p class="paper-outline-toggle-desc">
-              在文库中右键或按 Ctrl+C 复制 PDF 文件本身；关闭后恢复 Zotero 默认复制行为。
+              在文库中单选一篇文献，右键或按 Ctrl+C 复制 PDF 文件本身；关闭后恢复 Zotero 默认复制行为。
             </html:p>
           </html:div>
         </html:div>
@@ -254,13 +258,14 @@
 
           <html:div class="paper-outline-toggle-list" style="margin-top:16px;">
             <html:div class="paper-outline-toggle-item">
-              <checkbox id="paper-outline-save-as-note"
-                        class="paper-outline-toggle-control"
-                        native="true"
-                        aria-labelledby="paper-outline-save-as-note-title"
-                        preference="extensions.paperoutline.saveAsNote"/>
+              <html:input id="paper-outline-save-as-note"
+                          class="paper-outline-toggle-control"
+                          type="checkbox"
+                          aria-labelledby="paper-outline-save-as-note-title"/>
               <html:div class="paper-outline-toggle-copy">
-                <html:p id="paper-outline-save-as-note-title" class="paper-outline-toggle-title">同时把目录保存为子笔记</html:p>
+                <html:label for="paper-outline-save-as-note"
+                            id="paper-outline-save-as-note-title"
+                            class="paper-outline-toggle-title">同时把目录保存为子笔记</html:label>
                 <html:p class="paper-outline-toggle-desc">目录已常驻阅读器大纲栏，一般无需开启。</html:p>
               </html:div>
             </html:div>

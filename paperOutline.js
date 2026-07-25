@@ -31,6 +31,19 @@ var PaperOutline = {
     if (!get("apiUrl") && oldUrl && oldUrl !== "https://api.deepseek.com/chat/completions") {
       set("apiUrl", oldUrl);
     }
+
+    // DeepSeek 于 2026-07-24 停止支持旧模型名 deepseek-chat。
+    // 仅迁移官方 DeepSeek 端点；自定义中转可能仍把该名称作为别名，必须保留用户配置。
+    const provider = get("provider") || "deepseek";
+    const model = String(get("model") || "").trim();
+    const apiUrl = String(get("apiUrl") || "").trim().replace(/\/+$/, "");
+    const officialDeepSeek =
+      !apiUrl ||
+      apiUrl === "https://api.deepseek.com/chat/completions" ||
+      apiUrl === "https://api.deepseek.com/v1/chat/completions";
+    if (provider === "deepseek" && model === "deepseek-chat" && officialDeepSeek) {
+      set("model", "");
+    }
   },
 
   log(msg) {
@@ -1154,7 +1167,7 @@ var PaperOutline = {
   // ── AI 服务商预设（全部走 OpenAI 兼容 /chat/completions；Ollama 用其 /v1 兼容端点）──
   // 选定服务商即用其默认 URL/模型；用户在设置里填的 apiUrl/model 非空则覆盖（自定义服务商必填）。
   PROVIDERS: {
-    deepseek:    { label: "DeepSeek（默认）",          url: "https://api.deepseek.com/chat/completions",                          model: "deepseek-chat",           json: true },
+    deepseek:    { label: "DeepSeek（默认）",          url: "https://api.deepseek.com/chat/completions",                          model: "deepseek-v4-flash",       json: true },
     openai:      { label: "OpenAI",                     url: "https://api.openai.com/v1/chat/completions",                         model: "gpt-4o-mini",             json: true },
     moonshot:    { label: "月之暗面 Kimi",              url: "https://api.moonshot.cn/v1/chat/completions",                        model: "moonshot-v1-8k",          json: true },
     zhipu:       { label: "智谱 GLM",                   url: "https://open.bigmodel.cn/api/paas/v4/chat/completions",              model: "glm-4-flash",             json: true },
@@ -1277,6 +1290,9 @@ var PaperOutline = {
     const status = (e && e.xmlhttp && e.xmlhttp.status) || (e && e.status) || 0;
     const body = ((e && e.xmlhttp && e.xmlhttp.responseText) || (e && e.message) || "").toString();
     const low = body.toLowerCase();
+    if (low.includes("supported api model names") &&
+        (low.includes("deepseek-v4-flash") || low.includes("deepseek-v4-pro")))
+      return "DeepSeek 已停止支持旧模型 deepseek-chat。请把模型留空使用 deepseek-v4-flash（推荐），或填写 deepseek-v4-pro。";
     if (status === 401 || low.includes("invalid api key") || low.includes("incorrect api key") ||
         low.includes("authentication") || low.includes("unauthorized"))
       return "API Key 无效，请检查是否填写正确（设置 → AI 接口 → API Key）。";
@@ -2073,12 +2089,16 @@ var PaperOutline = {
     }
   },
 
-  // 文库右键菜单调用：复制当前选中条目（取第一个）的文件
+  // 文库右键菜单调用：内置剪贴板接口仅支持单文件；多选时明确提示，不静默只复制第一篇
   copySelectedFile() {
     try {
       const zp = Zotero.getActiveZoteroPane && Zotero.getActiveZoteroPane();
       const items = (zp && zp.getSelectedItems) ? zp.getSelectedItems() : [];
       if (!items || !items.length) { this._cfToast("未选中条目", "请先选中文献或其 PDF 附件"); return; }
+      if (items.length > 1) {
+        this._cfToast("暂不支持一次复制多篇", "请单选一篇文献；多选时 Zotero 的内置剪贴板无法可靠写入多份文件");
+        return;
+      }
       this.copyAttachmentFile(items[0]);
     } catch (e) { this.log("copySelectedFile: " + e); }
   },

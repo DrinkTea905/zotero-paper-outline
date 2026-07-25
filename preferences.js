@@ -2,7 +2,7 @@
 
 (function () {
   const PROVIDERS = {
-    deepseek: { label: "DeepSeek", model: "deepseek-chat" },
+    deepseek: { label: "DeepSeek", model: "deepseek-v4-flash" },
     openai: { label: "OpenAI", model: "gpt-4o-mini" },
     moonshot: { label: "月之暗面 Kimi", model: "moonshot-v1-8k" },
     zhipu: { label: "智谱 GLM", model: "glm-4-flash" },
@@ -10,6 +10,14 @@
     siliconflow: { label: "硅基流动 SiliconFlow", model: "deepseek-ai/DeepSeek-V3" },
     ollama: { label: "本地 Ollama", model: "qwen2.5" },
     custom: { label: "自定义服务", model: "" },
+  };
+
+  const TOGGLE_PREFERENCES = {
+    "paper-outline-auto-summary": { key: "autoSummary", fallback: true },
+    "paper-outline-auto-outline": { key: "autoOutline", fallback: true },
+    "paper-outline-despace-button": { key: "despaceButton", fallback: true },
+    "paper-outline-copy-file": { key: "copyFile", fallback: true },
+    "paper-outline-save-as-note": { key: "saveAsNote", fallback: false },
   };
 
   function byId(id) {
@@ -30,6 +38,7 @@
     init() {
       if (this._ready) return;
       this._ready = true;
+      this.bindTogglePreferences();
       this.updateProvider(false);
 
       [
@@ -43,6 +52,22 @@
         element.addEventListener(id === "paper-outline-provider" ? "command" : "input", () => {
           if (id === "paper-outline-provider") this.updateProvider(true);
           this.markConnectionDirty();
+        });
+      });
+    },
+
+    bindTogglePreferences() {
+      Object.keys(TOGGLE_PREFERENCES).forEach((id) => {
+        const element = byId(id);
+        const setting = TOGGLE_PREFERENCES[id];
+        if (!element || !setting) return;
+
+        const prefName = "extensions.paperoutline." + setting.key;
+        const current = Zotero.Prefs.get(prefName, true);
+        element.checked =
+          current === undefined || current === null ? setting.fallback : !!current;
+        element.addEventListener("change", () => {
+          Zotero.Prefs.set(prefName, !!element.checked, true);
         });
       });
     },

@@ -226,17 +226,53 @@
 
 .paper-outline-toggle-item {
   display: grid;
-  grid-template-columns: 28px minmax(0, 1fr);
+  grid-template-columns: 20px minmax(0, 1fr);
   align-items: start;
-  column-gap: 8px;
+  column-gap: 11px;
 }
 
 .paper-outline-toggle-control {
+  appearance: none;
+  box-sizing: border-box;
   align-self: start;
-  min-width: 24px;
-  min-height: 24px;
-  margin: 0;
+  width: 18px;
+  height: 18px;
+  min-width: 18px;
+  min-height: 18px;
+  margin: 2px 0 0;
   padding: 0;
+  border: 1.5px solid color-mix(in srgb, var(--paper-outline-muted) 58%, transparent);
+  border-radius: 5px;
+  background: var(--paper-outline-surface);
+  cursor: pointer;
+  position: relative;
+  transition: background-color 120ms ease, border-color 120ms ease, box-shadow 120ms ease;
+}
+
+.paper-outline-toggle-control:checked {
+  border-color: var(--paper-outline-accent);
+  background: var(--paper-outline-accent);
+}
+
+.paper-outline-toggle-control:checked::after {
+  content: "";
+  position: absolute;
+  left: 5px;
+  top: 2px;
+  width: 4px;
+  height: 8px;
+  border: solid #fff;
+  border-width: 0 2px 2px 0;
+  transform: rotate(45deg);
+}
+
+.paper-outline-toggle-control:hover {
+  border-color: var(--paper-outline-accent);
+}
+
+.paper-outline-toggle-control:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--paper-outline-accent) 22%, transparent);
 }
 
 .paper-outline-toggle-copy {
@@ -245,10 +281,12 @@
 }
 
 .paper-outline-toggle-title {
+  display: block;
   margin: 0;
   font-size: 13px;
   font-weight: 600;
   line-height: 1.45;
+  cursor: pointer;
 }
 
 .paper-outline-toggle-desc {
