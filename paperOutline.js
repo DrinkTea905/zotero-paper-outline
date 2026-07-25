@@ -89,6 +89,7 @@ var PaperOutline = {
   PAGE_INSTRUCTION:
     "【页码要求】正文中我用「===== 第 N 页 =====」标出了每页起始。" +
     "请在每个目录条目里额外输出一个整数字段 page，值＝该章节标题所在页码" +
+    "（不要使用论文首页或前置“目录/目次”页里列出的页码；同一标题在目录页和正文均出现时，必须取正文标题真正开始的页面）" +
     "（取标题上方最近的「第 N 页」标记）。即每个条目形如 " +
     '{"level":1,"title":"…","summary":"…","page":3}。',
 
@@ -284,7 +285,8 @@ var PaperOutline = {
         tries++;
       }
 
-      // 注入：仅当面板缺失时重建（带守卫，避免 MutationObserver 无限循环）。
+      // 注入：仅当面板缺失时重建。Zotero 收起侧栏时可能销毁 sidebarContent，
+      // 重新展开后会创建一个全新的容器，因此每次都重新查询当前宿主，不能保存旧节点引用。
       const ensureInjected = () => {
         try {
           const host = doc.getElementById("sidebarContent");
@@ -297,16 +299,6 @@ var PaperOutline = {
           } else {
             PaperOutline._updateReaderPanelVisibility(doc);
           }
-          // 点侧栏标签（缩略图/大纲/注释）或开关时，切换本面板显隐（仅大纲标签显示）
-          ["viewThumbnail", "viewOutline", "viewAnnotations", "sidebarToggle"].forEach((bid) => {
-            const b = doc.getElementById(bid);
-            if (b && !b._poHooked) {
-              b._poHooked = true;
-              b.addEventListener("click", () =>
-                rw.setTimeout(() => PaperOutline._updateReaderPanelVisibility(doc), 50)
-              );
-            }
-          });
           return true;
         } catch (e3) {
           PaperOutline.log("ensureInjected: " + e3);
@@ -315,14 +307,75 @@ var PaperOutline = {
       };
       this._readerEnsure = ensureInjected; // 暴露给诊断
       ensureInjected();
-
-      // React 若重渲侧栏把面板冲掉，立刻补回（守卫防循环；只观察 #sidebarContent 子节点）
+      // 旧版本可能已把前置“目录/目次”页缓存成所有章节的跳转页。
+      // 打开阅读器时做一次无 AI、无费用的本地页码修复，避免用户必须重新生成。
       try {
-        const host = doc.getElementById("sidebarContent");
-        if (host && rw.MutationObserver && !reader._paperOutlineObserver) {
-          const mo = new rw.MutationObserver(() => ensureInjected());
-          mo.observe(host, { childList: true });
+        if (item && this._getCache(item.key) && !reader._poCachedPageRepairStarted) {
+          reader._poCachedPageRepairStarted = true;
+          this._repairCachedOutlinePages(item, reader, doc).catch((e) =>
+            PaperOutline.log("repairCachedOutlinePages: " + e)
+          );
+        }
+      } catch (e2) {}
+
+      const scheduleEnsure = (delay) => {
+        try {
+          rw.setTimeout(() => ensureInjected(), delay || 0);
+        } catch (e) {}
+      };
+
+      // 用文档级事件委托监听侧栏开关和三个标签。按钮本身也会被 Zotero 重建，
+      // 事件委托无需在每个新按钮上重复绑定。
+      try {
+        if (reader._poSidebarClickDoc && reader._poSidebarClickHandler) {
+          try {
+            reader._poSidebarClickDoc.removeEventListener(
+              "click",
+              reader._poSidebarClickHandler,
+              true
+            );
+          } catch (e) {}
+        }
+        const sidebarClickHandler = (event) => {
+          let target = event && event.target;
+          while (target && target !== doc) {
+            const id = target.id || (target.getAttribute && target.getAttribute("id"));
+            if (["viewThumbnail", "viewOutline", "viewAnnotations", "sidebarToggle"].includes(id)) {
+              // React 的收起/展开与标签切换可能分两轮提交，分阶段补挂并更新显隐。
+              scheduleEnsure(40);
+              scheduleEnsure(160);
+              scheduleEnsure(360);
+              break;
+            }
+            target = target.parentNode;
+          }
+        };
+        doc.addEventListener("click", sidebarClickHandler, true);
+        reader._poSidebarClickDoc = doc;
+        reader._poSidebarClickHandler = sidebarClickHandler;
+      } catch (e2) {}
+
+      // React 若重建整个侧栏宿主，旧 host 上的观察器也会一起失效。
+      // 改为观察稳定的 reader 文档，并且只在“当前 host 存在但面板缺失”时补回。
+      try {
+        if (reader._paperOutlineObserver) {
+          try { reader._paperOutlineObserver.disconnect(); } catch (e) {}
+        }
+        const root = doc.body || doc.documentElement;
+        if (root && rw.MutationObserver) {
+          let pending = false;
+          const mo = new rw.MutationObserver(() => {
+            const currentHost = doc.getElementById("sidebarContent");
+            if (!currentHost || currentHost.querySelector("#paper-outline-reader") || pending) return;
+            pending = true;
+            rw.setTimeout(() => {
+              pending = false;
+              ensureInjected();
+            }, 30);
+          });
+          mo.observe(root, { childList: true, subtree: true });
           reader._paperOutlineObserver = mo;
+          reader._paperOutlineObserverDoc = doc;
         }
       } catch (e2) {}
 
@@ -943,6 +996,78 @@ var PaperOutline = {
     }
   },
 
+  // 识别论文前部的印刷“目录/目次”页。此类页面会密集重复后文标题，
+  // 如果按“第一次出现”定位，几乎所有章节都会被错误映射到首页。
+  _detectPrintedContentsPages(pages, outline) {
+    const norm = (s) => String(s || "").replace(/\s+/g, "");
+    const probes = [];
+    const seen = new Set();
+    for (const s of outline || []) {
+      const key = norm(s && s.title);
+      if (key.length < 2) continue;
+      const probe = key.slice(0, Math.min(18, key.length));
+      if (!seen.has(probe)) {
+        seen.add(probe);
+        probes.push(probe);
+      }
+    }
+    const detected = new Set();
+    if (!pages || !pages.length || probes.length < 2) return detected;
+
+    // 只检查文档前部，最多 12 页；正文中的章节回顾不会被误判成前置目录。
+    const frontLimit = Math.min(
+      pages.length,
+      Math.min(12, Math.max(6, Math.ceil(pages.length * 0.2)))
+    );
+    const denseThreshold = Math.max(4, Math.min(8, Math.ceil(probes.length * 0.35)));
+    let previousWasContents = false;
+    for (let i = 0; i < frontLimit; i++) {
+      const raw = String(pages[i] || "");
+      const page = norm(raw);
+      let matches = 0;
+      for (const probe of probes) {
+        if (page.includes(probe)) matches++;
+      }
+      const hasContentsHeading =
+        /(?:^|[\r\n])\s*(?:目\s*录|目\s*次|contents)\s*(?:[\r\n]|$)/im.test(raw);
+      const isContents =
+        (hasContentsHeading && matches >= 2) ||
+        matches >= denseThreshold ||
+        (previousWasContents && matches >= 3);
+      if (isContents) detected.add(i);
+      previousWasContents = isContents;
+    }
+    return detected;
+  },
+
+  async _repairCachedOutlinePages(item, reader, doc) {
+    const cached = item && this._getCache(item.key);
+    if (!cached || cached.length < 2) return false;
+    const att = (reader && reader._item) || (await this._resolveAttachment(item));
+    const pages = await this._getWorkerPages(att);
+    if (!pages || pages.length < 2) return false;
+    const contentsPages = this._detectPrintedContentsPages(pages, cached);
+    if (!contentsPages.size) return false;
+
+    const badCount = cached.filter((s) => {
+      const page = parseInt(s && s.page, 10);
+      return page > 0 && contentsPages.has(page - 1);
+    }).length;
+    if (badCount < Math.max(2, Math.ceil(cached.length * 0.3))) return false;
+
+    const repaired = cached.map((s) => Object.assign({}, s));
+    await this._fillPages(item, reader, repaired, pages);
+    const changed = repaired.some(
+      (s, i) => parseInt(s.page, 10) !== parseInt(cached[i] && cached[i].page, 10)
+    );
+    if (!changed) return false;
+    this._setCache(item.key, repaired);
+    const host = doc && doc.getElementById("sidebarContent");
+    if (host) this._renderReaderOutline(doc, host, item, reader);
+    this.log("已自动修复旧缓存中的目录页跳转：" + item.key);
+    return true;
+  },
+
   // 给每个条目补页码：① 有 worker 每页文本 → 逐页精确定位标题（精确到页）；
   // ② 拿不到则按字符偏移比例估算；③ 单调非递减 + 继承，保证每一级（含子标题）都有页码。
   async _fillPages(item, reader, outline, pages) {
@@ -954,26 +1079,40 @@ var PaperOutline = {
       } catch (e) {}
     }
     let numPages = pages && pages.length ? pages.length : 0;
+    let contentsPages = new Set();
+    let bodyStart = 0;
 
     if (pages && pages.length) {
-      // —— 精确：标题出现在哪一页的文本里，就是第几页（按目录顺序游标前进，避免短词错位）——
+      // —— 精确：跳过前置印刷目录页，再按目录顺序游标前进，避免短词和重复标题错位。——
       const np = pages.map(norm);
-      let cursor = 0,
+      contentsPages = this._detectPrintedContentsPages(pages, outline);
+      if (contentsPages.size) bodyStart = Math.max(...Array.from(contentsPages)) + 1;
+      let cursor = bodyStart,
         hit = 0;
       for (const s of outline) {
         const key = norm(s.title);
         if (key.length < 2) continue;
         const probe = key.slice(0, Math.min(18, key.length));
         let found = -1;
-        for (let i = cursor; i < np.length; i++) if (np[i].includes(probe)) { found = i; break; }
-        if (found < 0) for (let i = 0; i < np.length; i++) if (np[i].includes(probe)) { found = i; break; }
+        for (let i = cursor; i < np.length; i++) {
+          if (!contentsPages.has(i) && np[i].includes(probe)) { found = i; break; }
+        }
+        if (found < 0) {
+          for (let i = bodyStart; i < np.length; i++) {
+            if (!contentsPages.has(i) && np[i].includes(probe)) { found = i; break; }
+          }
+        }
         if (found >= 0) {
           s.page = found + 1; // 精确命中：覆盖 AI 的猜测
           cursor = found;
           hit++;
         }
       }
-      this.log("fillPages 精确命中=" + hit + "/" + outline.length + " 页数=" + numPages);
+      this.log(
+        "fillPages 精确命中=" + hit + "/" + outline.length +
+        " 页数=" + numPages +
+        " 排除目录页=" + Array.from(contentsPages).map((i) => i + 1).join(",")
+      );
     } else {
       // —— 退化：worker 取不到（极少数）→ 按 attachmentText 字符偏移比例估算缺失的 ——
       let body = "";
@@ -1005,9 +1144,10 @@ var PaperOutline = {
     }
 
     // 单调非递减 + 继承（目录顺序=文档顺序）→ 确保每条都有页码
-    let last = 1;
+    let last = bodyStart + 1;
     for (const s of outline) {
       let p = parseInt(s.page, 10);
+      if (p > 0 && contentsPages.has(p - 1)) p = 0;
       if (!p || p < 1) p = last;
       if (p < last) p = last;
       if (numPages) p = Math.min(p, numPages);
