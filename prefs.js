@@ -7,6 +7,15 @@ pref("extensions.paperoutline.apiUrl", "");
 pref("extensions.paperoutline.apiKey", "");
 pref("extensions.paperoutline.model", "");
 
+// —— 扫描 PDF 识别（MinerU 精准解析）——
+// Token 由用户自行创建；普通带文字层的 PDF 不会上传。
+pref("extensions.paperoutline.mineruToken", "");
+pref("extensions.paperoutline.mineruAutoUpload", false);
+// 保存 Token 的时间，用于按 MinerU 的 90 天有效期估算到期提醒。
+pref("extensions.paperoutline.mineruTokenSavedAt", "0");
+pref("extensions.paperoutline.mineruTokenExpired", false);
+pref("extensions.paperoutline.mineruExpiryReminderAt", "0");
+
 // —— 通用 ——
 pref("extensions.paperoutline.concurrency", 5);
 pref("extensions.paperoutline.maxCharsPerChunk", 40000);

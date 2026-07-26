@@ -101,6 +101,7 @@
 
 #paper-outline-provider,
 #paper-outline-api-key,
+#paper-outline-mineru-token,
 #paper-outline-model,
 #paper-outline-api-url,
 #paper-outline-max-level,
@@ -113,6 +114,7 @@
 }
 
 #paper-outline-api-key,
+#paper-outline-mineru-token,
 #paper-outline-model,
 #paper-outline-api-url,
 #paper-outline-concurrency,
@@ -127,6 +129,7 @@
 }
 
 #paper-outline-api-key:focus,
+#paper-outline-mineru-token:focus,
 #paper-outline-model:focus,
 #paper-outline-api-url:focus,
 #paper-outline-concurrency:focus,
@@ -160,6 +163,53 @@
 #paper-outline-test-button {
   min-width: 96px;
   font-weight: 600;
+}
+
+.paper-outline-mineru-note {
+  margin-bottom: 15px;
+  padding: 10px 12px;
+  border: 1px solid color-mix(in srgb, var(--paper-outline-accent) 18%, transparent);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--paper-outline-accent-soft) 72%, transparent);
+  color: inherit;
+  font-size: 12px;
+  line-height: 1.65;
+}
+
+.paper-outline-mineru-note strong {
+  margin-right: 4px;
+  color: var(--paper-outline-accent);
+}
+
+.paper-outline-mineru-form {
+  margin-top: 2px;
+}
+
+.paper-outline-mineru-actions {
+  flex-wrap: wrap;
+}
+
+#paper-outline-mineru-test-button {
+  min-width: 96px;
+  font-weight: 600;
+}
+
+.paper-outline-link-button {
+  color: var(--paper-outline-accent);
+  font-weight: 600;
+}
+
+.paper-outline-mineru-toggle {
+  margin-top: 16px;
+  padding-top: 15px;
+  border-top: 1px solid var(--paper-outline-border);
+}
+
+.paper-outline-mineru-privacy {
+  margin: 14px 0 0 31px;
+  color: var(--paper-outline-muted);
+  font-size: 11.5px;
+  line-height: 1.6;
 }
 
 .paper-outline-cost-note {

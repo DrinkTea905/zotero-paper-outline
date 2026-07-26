@@ -62,6 +62,7 @@ function shutdown() {
   if (typeof PaperOutline !== "undefined") {
     PaperOutline.unregisterMenu();
     PaperOutline.unregisterAutoObserver();
+    try { PaperOutline.cancelMineruExpiryReminder(); } catch (e) {}
     try { PaperOutline.unregisterDespace(); } catch (e) {}
     try { PaperOutline.unregisterCopyFile(); } catch (e) {}
     // eslint-disable-next-line no-global-assign

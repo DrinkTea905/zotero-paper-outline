@@ -9,6 +9,12 @@ var PaperOutline = {
   id: null,
   rootURI: null,
   _addedWindows: new Set(),
+  MINERU_API_BASE: "https://mineru.net/api/v4",
+  MINERU_TOKEN_URL: "https://mineru.net/apiManage/token",
+  MINERU_TOKEN_DAYS: 90,
+  MINERU_WARNING_DAYS: 14,
+  _mineruTextCache: null,
+  _mineruReminderTimer: null,
 
   init({ id, version, rootURI }) {
     this.id = id;
@@ -17,6 +23,7 @@ var PaperOutline = {
     // 暴露到 Zotero 主对象，方便在「运行 JavaScript」里诊断/手动触发
     try { Zotero.PaperOutlineGPT = this; } catch (e) {}
     try { this._migratePrefs(); } catch (e) {}
+    try { this._scheduleMineruExpiryReminder(); } catch (e) {}
   },
 
   // 旧版偏好迁移：openai.* → 统一的 apiKey/apiUrl/model（仅在新键为空时复制，保住用户已填配置）
@@ -43,6 +50,13 @@ var PaperOutline = {
       apiUrl === "https://api.deepseek.com/v1/chat/completions";
     if (provider === "deepseek" && model === "deepseek-chat" && officialDeepSeek) {
       set("model", "");
+    }
+
+    // 旧版本没有保存 Token 录入时间；升级后从首次读取时开始估算 90 天有效期。
+    if (get("mineruToken") && !parseInt(get("mineruTokenSavedAt") || "0", 10)) {
+      set("mineruTokenSavedAt", String(Date.now()));
+      set("mineruTokenExpired", false);
+      set("mineruExpiryReminderAt", "0");
     }
   },
 
@@ -849,20 +863,28 @@ var PaperOutline = {
     opts = opts || {};
     // opts.pagedText：带「===== 第 N 页 =====」标记的全文（阅读器面板传入，用于让 AI 标页码）
     // opts.att：指定 PDF 附件（阅读器面板传入当前打开的那个，避免多 PDF 时取错）
-    let fullText = opts.pagedText || "";
+    let fullText = opts.pagedText || opts.fullText || "";
     if (!fullText) {
       const att = opts.att || (await this._resolveAttachment(item));
       if (!att || !att.isPDFAttachment()) {
         throw new Error("没有可用的 PDF 附件");
       }
-      try {
-        fullText = (await att.attachmentText) || "";
-      } catch (e) {
-        this.log("attachmentText error: " + e);
+      const bundle = await this._getTextBundleForItem(att, {
+        allowOCR: opts.allowOCR,
+        context: opts.context || "manual",
+        onText,
+      });
+      if (bundle.pages && bundle.pages.length) {
+        opts.pagedText = bundle.pages
+          .map((text, index) => "\n\n===== 第 " + (index + 1) + " 页 =====\n" + text)
+          .join("");
+        fullText = opts.pagedText;
+      } else {
+        fullText = bundle.text || "";
       }
     }
     if (!fullText.trim()) {
-      throw new Error("PDF 全文为空（可能是扫描件，需先 OCR）");
+      throw new Error("没有识别出可用的论文文字。");
     }
 
     // 系统提示：带页码标记时追加“标出每节起始页”的要求；并按设置控制识别层级深度
@@ -967,6 +989,7 @@ var PaperOutline = {
     const att = (reader && reader._item) || (await this._resolveAttachment(item));
     let pages = null;
     try { pages = await this._getWorkerPages(att); } catch (e) { this.log("workerPages: " + e); }
+    if (pages && !this._hasReadablePdfText(pages.join("\n"))) pages = null;
     const pagedText =
       pages && pages.length ? pages.map((t, i) => `\n\n===== 第 ${i + 1} 页 =====\n` + t).join("") : null;
     this.log("generateReaderOutline workerPages=" + (pages ? pages.length : "无"));
@@ -1437,6 +1460,275 @@ var PaperOutline = {
     return p !== "ollama" && p !== "custom";
   },
 
+  getMineruTokenStatus(overrides) {
+    overrides = overrides || {};
+    const token = String(
+      overrides.token !== undefined ? overrides.token : this.pref("mineruToken", "")
+    ).trim();
+    if (!token) {
+      return {
+        configured: false,
+        state: "missing",
+        daysLeft: 0,
+        expiresAt: 0,
+        dateText: "",
+      };
+    }
+
+    let savedAt = parseInt(this.pref("mineruTokenSavedAt", "0"), 10) || 0;
+    if (!savedAt) {
+      savedAt = Date.now();
+      try {
+        Zotero.Prefs.set(
+          "extensions.paperoutline.mineruTokenSavedAt",
+          String(savedAt),
+          true
+        );
+      } catch (e) {}
+    }
+    const expiresAt = savedAt + this.MINERU_TOKEN_DAYS * 24 * 60 * 60 * 1000;
+    const daysLeft = Math.max(
+      0,
+      Math.ceil((expiresAt - Date.now()) / (24 * 60 * 60 * 1000))
+    );
+    const apiMarkedExpired =
+      this.pref("mineruTokenExpired", false) === true ||
+      String(this.pref("mineruTokenExpired", false)) === "true";
+    const state =
+      apiMarkedExpired || Date.now() >= expiresAt
+        ? "expired"
+        : daysLeft <= this.MINERU_WARNING_DAYS
+          ? "warning"
+          : "valid";
+    return {
+      configured: true,
+      state,
+      daysLeft,
+      savedAt,
+      expiresAt,
+      dateText: this._formatDate(expiresAt),
+    };
+  },
+
+  _formatDate(timestamp) {
+    const date = new Date(timestamp);
+    const pad = (value) => String(value).padStart(2, "0");
+    return (
+      date.getFullYear() +
+      "-" +
+      pad(date.getMonth() + 1) +
+      "-" +
+      pad(date.getDate())
+    );
+  },
+
+  _scheduleMineruExpiryReminder() {
+    const showReminder = () => {
+      try {
+        const status = this.getMineruTokenStatus();
+        if (!status.configured || status.state === "valid") return;
+        const last = parseInt(this.pref("mineruExpiryReminderAt", "0"), 10) || 0;
+        const interval =
+          status.state === "expired" ? 3 * 24 * 60 * 60 * 1000 : 7 * 24 * 60 * 60 * 1000;
+        if (last && Date.now() - last < interval) return;
+
+        if (status.state === "expired") {
+          this._toast(
+            "MinerU Token 需要更新",
+            "Token 可能已到期。重新创建并替换后，扫描 PDF 才能继续识别。"
+          );
+        } else {
+          this._toast(
+            "MinerU Token 即将到期",
+            "按保存时间估算还剩 " +
+              status.daysLeft +
+              " 天，请在到期后重新创建 Token。"
+          );
+        }
+        Zotero.Prefs.set(
+          "extensions.paperoutline.mineruExpiryReminderAt",
+          String(Date.now()),
+          true
+        );
+      } catch (e) {
+        this.log("mineru expiry reminder: " + e);
+      }
+    };
+
+    try {
+      this.cancelMineruExpiryReminder();
+      const win = Zotero.getMainWindow && Zotero.getMainWindow();
+      const timerHost = win && win.setTimeout ? win : globalThis;
+      const schedule = (delay) => {
+        const id = timerHost.setTimeout(() => {
+          showReminder();
+          schedule(24 * 60 * 60 * 1000);
+        }, delay);
+        this._mineruReminderTimer = { timerHost, id };
+      };
+      schedule(3500);
+    } catch (e) {}
+  },
+
+  cancelMineruExpiryReminder() {
+    try {
+      const timer = this._mineruReminderTimer;
+      if (timer && timer.timerHost && timer.timerHost.clearTimeout) {
+        timer.timerHost.clearTimeout(timer.id);
+      }
+    } catch (e) {}
+    this._mineruReminderTimer = null;
+  },
+
+  openMineruTokenPage() {
+    Zotero.launchURL(this.MINERU_TOKEN_URL);
+  },
+
+  async openSettings() {
+    try {
+      if (
+        Zotero.Utilities &&
+        Zotero.Utilities.Internal &&
+        typeof Zotero.Utilities.Internal.openPreferences === "function"
+      ) {
+        await Zotero.Utilities.Internal.openPreferences(this.id);
+        return true;
+      }
+    } catch (e) {
+      this.log("open preferences: " + e);
+    }
+    try {
+      const win = Zotero.getMainWindow();
+      if (win && typeof win.openPreferences === "function") {
+        win.openPreferences(this.id);
+        return true;
+      }
+    } catch (e) {}
+    try {
+      if (
+        Zotero.Utilities &&
+        Zotero.Utilities.Internal &&
+        typeof Zotero.Utilities.Internal.openPreferences === "function"
+      ) {
+        await Zotero.Utilities.Internal.openPreferences();
+        return true;
+      }
+    } catch (e) {}
+    return false;
+  },
+
+  _mineruAuthHeaders(token) {
+    return { Authorization: "Bearer " + String(token || "").trim() };
+  },
+
+  _parseMineruResponse(text) {
+    if (!text) return {};
+    try {
+      return JSON.parse(text);
+    } catch (e) {
+      return {};
+    }
+  },
+
+  _mineruErrorMessage(code, message, status) {
+    const key = String(code === undefined || code === null ? "" : code);
+    if (key === "A0202" || status === 401 || status === 403) {
+      return "MinerU Token 无效，请检查是否完整复制。";
+    }
+    if (key === "A0211") {
+      return "MinerU Token 已到期，请重新创建并替换。";
+    }
+    if (key === "-60005") return "这份 PDF 超过 MinerU 当前允许的文件大小。";
+    if (key === "-60006") return "这份 PDF 页数超过 MinerU 当前允许的范围。";
+    if (key === "-60009") return "MinerU 当前任务较多，请稍后再试。";
+    if (key === "-60018") return "今天的 MinerU 识别额度已用完，请明天再试。";
+    if (key === "-60012") return "没有找到这次识别任务，请重新发起。";
+    if (key === "-60013") return "识别结果已过期，请重新发起。";
+    if (status === 429) return "MinerU 请求较多，请稍后再试。";
+    if (status >= 500) return "MinerU 服务暂时不可用，请稍后再试。";
+    const brief = String(message || "").replace(/\s+/g, " ").trim().slice(0, 120);
+    return brief ? "MinerU 识别失败：" + brief : "MinerU 识别失败，请稍后再试。";
+  },
+
+  _markMineruExpired(expired) {
+    try {
+      Zotero.Prefs.set("extensions.paperoutline.mineruTokenExpired", !!expired, true);
+    } catch (e) {}
+  },
+
+  async _mineruJSONRequest(method, url, options) {
+    options = options || {};
+    let xhr;
+    try {
+      xhr = await Zotero.HTTP.request(method, url, {
+        headers: options.headers || {},
+        body: options.body,
+        responseType: "text",
+        timeout: options.timeout || 60000,
+      });
+    } catch (error) {
+      const raw =
+        (error && error.xmlhttp && error.xmlhttp.responseText) ||
+        (error && error.message) ||
+        "";
+      const parsed = this._parseMineruResponse(raw);
+      const status =
+        (error && error.xmlhttp && error.xmlhttp.status) || (error && error.status) || 0;
+      const code =
+        parsed.code !== undefined && parsed.code !== null ? parsed.code : parsed.msgCode;
+      if (String(code) === "A0211") this._markMineruExpired(true);
+      if (
+        options.acceptNonAuthError &&
+        status !== 401 &&
+        status !== 403 &&
+        String(code) !== "A0202" &&
+        String(code) !== "A0211"
+      ) {
+        return parsed;
+      }
+      throw new Error(this._mineruErrorMessage(code, parsed.msg || raw, status));
+    }
+
+    const parsed = this._parseMineruResponse(xhr.responseText);
+    const code =
+      parsed.code !== undefined && parsed.code !== null ? parsed.code : parsed.msgCode;
+    if (String(code) === "A0211") this._markMineruExpired(true);
+    if (String(code) === "A0202" || String(code) === "A0211") {
+      throw new Error(this._mineruErrorMessage(code, parsed.msg, xhr.status || 0));
+    }
+    if (
+      !options.acceptNonAuthError &&
+      code !== undefined &&
+      code !== null &&
+      String(code) !== "0" &&
+      String(code).toLowerCase() !== "success"
+    ) {
+      throw new Error(this._mineruErrorMessage(code, parsed.msg, xhr.status || 0));
+    }
+    return parsed;
+  },
+
+  async testMineruConnection(overrides) {
+    overrides = overrides || {};
+    const token = String(
+      overrides.token !== undefined ? overrides.token : this.pref("mineruToken", "")
+    ).trim();
+    if (!token) throw new Error("请先填写 MinerU Token。");
+
+    await this._mineruJSONRequest(
+      "GET",
+      this.MINERU_API_BASE + "/extract-results/batch/paper-outline-connection-check",
+      {
+        headers: this._mineruAuthHeaders(token),
+        timeout: 30000,
+        acceptNonAuthError: true,
+      }
+    );
+    this._markMineruExpired(false);
+    const status = this.getMineruTokenStatus({ token });
+    return { dateText: status.dateText, daysLeft: status.daysLeft };
+  },
+
   // 设置页「测试连接」：走与正式生成相同的 chat/completions 请求链，仅发送极短消息。
   async testConnection(overrides) {
     const config = await this._prepareAI(overrides, true);
@@ -1661,21 +1953,387 @@ var PaperOutline = {
     return null;
   },
 
-  // 取附件全文：优先 PDFWorker（CID-aware，知网/扫描双层也能读），退化 attachmentText
-  async _getFullTextForItem(att) {
-    if (!att) return "";
+  _hasReadablePdfText(text) {
+    const compact = String(text || "").replace(/\s+/g, "");
+    const meaningful = compact.replace(
+      /[^\p{L}\p{N}\u3400-\u9fff]/gu,
+      ""
+    );
+    return meaningful.length >= 80;
+  },
+
+  _confirmMineru(title, message) {
+    try {
+      return Services.prompt.confirm(Zotero.getMainWindow(), title, message);
+    } catch (e) {
+      try {
+        return Zotero.getMainWindow().confirm(message);
+      } catch (e2) {
+        return false;
+      }
+    }
+  },
+
+  async _ensureMineruReady() {
+    const token = String(this.pref("mineruToken", "") || "").trim();
+    if (!token) {
+      const open = this._confirmMineru(
+        "扫描 PDF 需要文字识别",
+        "这份 PDF 没有可读取的文字，Paper Outline 需要先用 MinerU 识别页面内容，才能继续生成总结和目录。\n\n尚未设置 MinerU Token。是否现在打开设置？"
+      );
+      if (open) await this.openSettings();
+      throw new Error("扫描 PDF 需要先设置 MinerU Token。");
+    }
+
+    const status = this.getMineruTokenStatus({ token });
+    if (status.state === "expired") {
+      const open = this._confirmMineru(
+        "MinerU Token 需要更新",
+        "MinerU Token 有效期为 90 天，当前 Token 可能已到期。请重新创建后回到设置中替换。\n\n是否现在前往 MinerU？"
+      );
+      if (open) this.openMineruTokenPage();
+      throw new Error("MinerU Token 可能已到期，请重新创建并替换。");
+    }
+
+    const autoUpload =
+      this.pref("mineruAutoUpload", false) === true ||
+      String(this.pref("mineruAutoUpload", false)) === "true";
+    if (!autoUpload) {
+      const confirmed = this._confirmMineru(
+        "上传扫描 PDF 进行识别",
+        "这份 PDF 没有可读取的文字。继续后，当前 PDF 会发送至 MinerU 完成文字识别，识别结果将用于生成总结和目录。\n\n是否上传并继续？"
+      );
+      if (!confirmed) throw new Error("已取消上传扫描 PDF。");
+    }
+    return token;
+  },
+
+  async _attachmentFilePath(att) {
+    let path = "";
+    try {
+      path = att.getFilePath();
+    } catch (e) {}
+    if (!path) {
+      try {
+        path = await att.getFilePathAsync();
+      } catch (e) {}
+    }
+    if (!path || !(await IOUtils.exists(path))) {
+      throw new Error("找不到这份 PDF 的本地文件。");
+    }
+    return path;
+  },
+
+  async _uploadMineruFile(uploadUrl, path) {
+    const bytes = await IOUtils.read(path);
+    try {
+      await Zotero.HTTP.request("PUT", uploadUrl, {
+        body: bytes,
+        responseType: "text",
+        timeout: 10 * 60 * 1000,
+      });
+    } catch (error) {
+      const status =
+        (error && error.xmlhttp && error.xmlhttp.status) || (error && error.status) || 0;
+      if (status === 0) throw new Error("PDF 上传失败，请检查网络后重试。");
+      throw new Error("PDF 上传失败，请稍后重试。");
+    }
+  },
+
+  async _waitForMineruResult(batchID, token, onText) {
+    const deadline = Date.now() + 20 * 60 * 1000;
+    while (Date.now() < deadline) {
+      const result = await this._mineruJSONRequest(
+        "GET",
+        this.MINERU_API_BASE + "/extract-results/batch/" + encodeURIComponent(batchID),
+        {
+          headers: this._mineruAuthHeaders(token),
+          timeout: 60000,
+        }
+      );
+      const tasks =
+        (result.data && (result.data.extract_result || result.data.extract_results)) || [];
+      const task = tasks[0];
+      if (!task) {
+        await this._sleep(3000);
+        continue;
+      }
+
+      const state = String(task.state || task.status || "").toLowerCase();
+      if (state === "done" || state === "success") {
+        const zipUrl = task.full_zip_url || task.fullZipUrl;
+        if (!zipUrl) throw new Error("MinerU 已完成识别，但没有返回可用结果。");
+        return zipUrl;
+      }
+      if (state === "failed" || state === "error") {
+        throw new Error(
+          this._mineruErrorMessage(task.err_code, task.err_msg || task.error, 0)
+        );
+      }
+
+      if (onText) {
+        const progress = task.extract_progress || task.progress || {};
+        const current =
+          progress.extracted_pages || progress.current_page || progress.current || 0;
+        const total = progress.total_pages || progress.total || 0;
+        onText(
+          current && total
+            ? "MinerU 正在识别扫描页（" + current + "/" + total + "）…"
+            : "MinerU 正在识别扫描页…"
+        );
+      }
+      await this._sleep(3000);
+    }
+    throw new Error("MinerU 识别等待时间较长，请稍后重试。");
+  },
+
+  _localFile(path) {
+    const file = Components.classes["@mozilla.org/file/local;1"].createInstance(
+      Components.interfaces.nsIFile
+    );
+    file.initWithPath(path);
+    return file;
+  },
+
+  _mineruBlockText(block) {
+    if (block === null || block === undefined) return "";
+    if (typeof block === "string" || typeof block === "number") return String(block);
+    if (Array.isArray(block)) {
+      return block
+        .map((value) => this._mineruBlockText(value))
+        .filter(Boolean)
+        .join("\n");
+    }
+
+    for (const key of ["text", "content", "latex", "html"]) {
+      if (typeof block[key] === "string" && block[key].trim()) return block[key].trim();
+    }
+    for (const key of [
+      "blocks",
+      "children",
+      "para_blocks",
+      "body",
+      "caption",
+      "img_caption",
+      "table_caption",
+    ]) {
+      if (block[key]) {
+        const text = this._mineruBlockText(block[key]);
+        if (text.trim()) return text.trim();
+      }
+    }
+    return "";
+  },
+
+  _mineruPagesFromContentList(content, fallbackText) {
+    const pageMap = new Map();
+    const visit = (value, inheritedPage) => {
+      if (value === null || value === undefined) return;
+      if (Array.isArray(value)) {
+        for (const child of value) visit(child, inheritedPage);
+        return;
+      }
+      if (typeof value !== "object") return;
+
+      let page = value.page_idx;
+      if (page === undefined || page === null) page = value.page_index;
+      if (page === undefined || page === null) page = inheritedPage;
+      if (page !== undefined && page !== null) {
+        const text = this._mineruBlockText(value);
+        if (text.trim()) {
+          const index = Math.max(0, parseInt(page, 10) || 0);
+          const list = pageMap.get(index) || [];
+          list.push(text.trim());
+          pageMap.set(index, list);
+          return;
+        }
+      }
+
+      for (const key of ["pages", "blocks", "children", "para_blocks", "body"]) {
+        if (value[key]) visit(value[key], page);
+      }
+    };
+    visit(content, undefined);
+
+    if (!pageMap.size) return fallbackText ? [String(fallbackText)] : [];
+    const maxPage = Math.max(...pageMap.keys());
+    const pages = [];
+    for (let index = 0; index <= maxPage; index++) {
+      const values = pageMap.get(index) || [];
+      pages.push([...new Set(values)].join("\n\n"));
+    }
+    return pages;
+  },
+
+  async _readMineruZip(arrayBuffer) {
+    const nonce = Date.now() + "-" + Math.random().toString(16).slice(2);
+    const zipPath = PathUtils.join(PathUtils.tempDir, "paper-outline-mineru-" + nonce + ".zip");
+    const extracted = [];
+    let reader = null;
+    try {
+      const bytes =
+        arrayBuffer instanceof Uint8Array ? arrayBuffer : new Uint8Array(arrayBuffer);
+      await IOUtils.write(zipPath, bytes);
+      reader = Components.classes["@mozilla.org/libjar/zip-reader;1"].createInstance(
+        Components.interfaces.nsIZipReader
+      );
+      reader.open(this._localFile(zipPath));
+
+      const entries = [];
+      const enumeration = reader.findEntries("*");
+      while (enumeration.hasMore()) entries.push(enumeration.getNext());
+      const markdownEntry =
+        entries.find((name) => /(^|\/)full\.md$/i.test(name)) ||
+        entries.find((name) => /\.md$/i.test(name));
+      const contentEntry =
+        entries.find(
+          (name) => /_content_list\.json$/i.test(name) && !/_content_list_v2\.json$/i.test(name)
+        ) ||
+        entries.find((name) => /_content_list_v2\.json$/i.test(name)) ||
+        entries.find((name) => /content.*\.json$/i.test(name));
+
+      if (!markdownEntry) throw new Error("MinerU 结果中没有找到识别后的正文。");
+      const extractEntry = async (entry, suffix) => {
+        const target = PathUtils.join(
+          PathUtils.tempDir,
+          "paper-outline-mineru-" + nonce + suffix
+        );
+        reader.extract(entry, this._localFile(target));
+        extracted.push(target);
+        return await IOUtils.readUTF8(target);
+      };
+
+      const markdown = await extractEntry(markdownEntry, ".md");
+      let content = null;
+      if (contentEntry) {
+        try {
+          content = JSON.parse(await extractEntry(contentEntry, ".json"));
+        } catch (e) {
+          this.log("parse MinerU content list: " + e);
+        }
+      }
+      const pages = this._mineruPagesFromContentList(content, markdown);
+      return { text: markdown, pages };
+    } finally {
+      try {
+        if (reader) reader.close();
+      } catch (e) {}
+      for (const path of extracted) {
+        try {
+          await IOUtils.remove(path);
+        } catch (e) {}
+      }
+      try {
+        await IOUtils.remove(zipPath);
+      } catch (e) {}
+    }
+  },
+
+  async _downloadMineruResult(zipUrl) {
+    let xhr;
+    try {
+      xhr = await Zotero.HTTP.request("GET", zipUrl, {
+        responseType: "arraybuffer",
+        timeout: 10 * 60 * 1000,
+      });
+    } catch (error) {
+      throw new Error("识别结果下载失败，请检查网络后重试。");
+    }
+    const data = xhr.response || (xhr.xmlhttp && xhr.xmlhttp.response);
+    if (!data) throw new Error("MinerU 没有返回可用的识别结果。");
+    return await this._readMineruZip(data);
+  },
+
+  async _recognizeWithMineru(att, opts) {
+    opts = opts || {};
+    if (!this._mineruTextCache) this._mineruTextCache = new Map();
+    const cacheKey = String(att && (att.id || att.key || att.attachmentFilename));
+    if (this._mineruTextCache.has(cacheKey)) {
+      return this._mineruTextCache.get(cacheKey);
+    }
+
+    const token = await this._ensureMineruReady();
+    const path = await this._attachmentFilePath(att);
+    const filename =
+      att.attachmentFilename ||
+      (typeof PathUtils.filename === "function" ? PathUtils.filename(path) : "paper.pdf");
+    if (opts.onText) opts.onText("正在准备扫描 PDF…");
+    const created = await this._mineruJSONRequest(
+      "POST",
+      this.MINERU_API_BASE + "/file-urls/batch",
+      {
+        headers: Object.assign(
+          { "Content-Type": "application/json" },
+          this._mineruAuthHeaders(token)
+        ),
+        body: JSON.stringify({
+          files: [
+            {
+              name: filename,
+              data_id: cacheKey,
+              is_ocr: true,
+            },
+          ],
+          model_version: "vlm",
+          enable_formula: true,
+          enable_table: true,
+          language: "ch",
+        }),
+        timeout: 60000,
+      }
+    );
+    const data = created.data || {};
+    const batchID = data.batch_id || data.batchId;
+    const uploadUrls = data.file_urls || data.fileUrls || [];
+    const uploadUrl =
+      (uploadUrls[0] && (uploadUrls[0].url || uploadUrls[0].file_url)) || uploadUrls[0];
+    if (!batchID || !uploadUrl) {
+      throw new Error("MinerU 没有返回上传地址，请稍后重试。");
+    }
+
+    if (opts.onText) opts.onText("正在上传扫描 PDF 至 MinerU…");
+    await this._uploadMineruFile(uploadUrl, path);
+    const zipUrl = await this._waitForMineruResult(batchID, token, opts.onText);
+    if (opts.onText) opts.onText("正在读取识别结果…");
+    const result = await this._downloadMineruResult(zipUrl);
+    if (!result.text || !result.text.trim()) {
+      throw new Error("MinerU 已完成识别，但没有识别出可用文字。");
+    }
+    this._mineruTextCache.set(cacheKey, result);
+    return result;
+  },
+
+  async _getTextBundleForItem(att, opts) {
+    opts = opts || {};
+    if (!att) return { text: "", pages: null, source: "empty" };
     try {
       const pages = await this._getWorkerPages(att);
       if (pages && pages.length) {
         const t = pages.join("\n");
-        if (t.trim()) return t;
+        if (this._hasReadablePdfText(t)) {
+          return { text: t, pages, source: "local" };
+        }
       }
     } catch (e) {}
     try {
       const t = (await att.attachmentText) || "";
-      if (t.trim()) return t;
+      if (this._hasReadablePdfText(t)) {
+        return { text: t, pages: null, source: "local" };
+      }
     } catch (e) {}
-    return "";
+    if (opts.allowOCR === false) return { text: "", pages: null, source: "empty" };
+    const recognized = await this._recognizeWithMineru(att, opts);
+    return {
+      text: recognized.text,
+      pages: recognized.pages,
+      source: "mineru",
+    };
+  },
+
+  // 取附件全文：优先读取 PDF 自带文字；扫描件按设置交给 MinerU 识别。
+  async _getFullTextForItem(att, opts) {
+    const bundle = await this._getTextBundleForItem(att, opts);
+    return bundle.text || "";
   },
 
   // 总结只需代表性内容：超长则取首段(70%)+尾段(30%)，覆盖引言与结论
@@ -1695,9 +2353,12 @@ var PaperOutline = {
       const att = opts.att || (await this._bestPdf(item));
       if (!att || !att.isPDFAttachment()) throw new Error("没有可用的 PDF 附件");
       if (onText) onText("取 PDF 全文…");
-      full = await this._getFullTextForItem(att);
+      full = await this._getFullTextForItem(att, {
+        context: opts.context || "manual",
+        onText,
+      });
     }
-    if (!full || !full.trim()) throw new Error("PDF 全文为空（可能是扫描件，需先 OCR）");
+    if (!full || !full.trim()) throw new Error("没有识别出可用的论文文字。");
     const text = this._textForSummary(full, this.SUMMARY_MAX_CHARS);
     const sys = this.pref("summaryPrompt", this.SUMMARY_PROMPT);
     if (onText) onText("AI 总结中…");
@@ -1862,15 +2523,21 @@ var PaperOutline = {
 
   // ── 自动模式下生成目录（无 reader）：worker 抽页 → AI → 补页码 → 缓存 ──
   async _buildOutlineAuto(item, att, onText) {
-    let pages = null;
-    try {
-      pages = await this._getWorkerPages(att);
-    } catch (e) {}
+    const bundle = await this._getTextBundleForItem(att, {
+      context: "auto",
+      onText,
+    });
+    const pages = bundle.pages;
     const pagedText =
       pages && pages.length
         ? pages.map((t, i) => `\n\n===== 第 ${i + 1} 页 =====\n` + t).join("")
         : null;
-    const outline = await this.generateOutline(item, onText, { pagedText, att });
+    const outline = await this.generateOutline(item, onText, {
+      pagedText,
+      fullText: bundle.text,
+      att,
+      context: "auto",
+    });
     if (outline && outline.length) {
       try {
         await this._fillPages(item, null, outline, pages);
@@ -1992,14 +2659,14 @@ var PaperOutline = {
     // 等正文就绪：刚入库时文件可能还在写入/抽取，重试几次
     let full = "";
     for (let i = 0; i < 4; i++) {
-      full = await this._getFullTextForItem(att);
+      full = await this._getFullTextForItem(att, { allowOCR: false });
       if (full.trim()) break;
       await this._sleep(3000);
     }
     if (!full.trim()) {
-      this.log("auto: 无可用正文，跳过 " + item.key);
-      return;
+      full = await this._getFullTextForItem(att, { context: "auto" });
     }
+    if (!full.trim()) return;
 
     const did = [];
     if (wantSummary) {

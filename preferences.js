@@ -15,6 +15,11 @@
   const TOGGLE_PREFERENCES = {
     "paper-outline-auto-summary": { key: "autoSummary", fallback: true },
     "paper-outline-auto-outline": { key: "autoOutline", fallback: true },
+    "paper-outline-mineru-auto-upload": {
+      key: "mineruAutoUpload",
+      fallback: false,
+      confirmUpload: true,
+    },
     "paper-outline-despace-button": { key: "despaceButton", fallback: true },
     "paper-outline-copy-file": { key: "copyFile", fallback: true },
     "paper-outline-save-as-note": { key: "saveAsNote", fallback: false },
@@ -34,12 +39,15 @@
   window.PaperOutlinePrefsUI = {
     _ready: false,
     _testing: false,
+    _mineruTesting: false,
+    _mineruTokenSnapshot: "",
 
     init() {
       if (this._ready) return;
       this._ready = true;
       this.bindTogglePreferences();
       this.updateProvider(false);
+      this.bindMineruPreferences();
 
       [
         "paper-outline-provider",
@@ -67,9 +75,185 @@
         element.checked =
           current === undefined || current === null ? setting.fallback : !!current;
         element.addEventListener("change", () => {
+          if (setting.confirmUpload && element.checked) {
+            const token = String(
+              Zotero.Prefs.get("extensions.paperoutline.mineruToken", true) || ""
+            ).trim();
+            if (!token) {
+              element.checked = false;
+              window.alert("请先填写 MinerU Token，再开启默认上传。");
+              const tokenElement = byId("paper-outline-mineru-token");
+              if (tokenElement) tokenElement.focus();
+              return;
+            }
+            const confirmed = window.confirm(
+              "开启后，遇到没有可读取文字的扫描 PDF，Paper Outline 会把当前 PDF 发送至 MinerU 完成文字识别，不再逐篇询问。\n\n普通 PDF 不会上传。是否开启？"
+            );
+            if (!confirmed) {
+              element.checked = false;
+              return;
+            }
+          }
           Zotero.Prefs.set(prefName, !!element.checked, true);
         });
       });
+    },
+
+    bindMineruPreferences() {
+      const tokenElement = byId("paper-outline-mineru-token");
+      if (!tokenElement) return;
+
+      const savedToken = String(
+        Zotero.Prefs.get("extensions.paperoutline.mineruToken", true) || ""
+      ).trim();
+      tokenElement.value = savedToken;
+      this._mineruTokenSnapshot = savedToken;
+
+      if (
+        savedToken &&
+        !parseInt(
+          Zotero.Prefs.get("extensions.paperoutline.mineruTokenSavedAt", true) || "0",
+          10
+        )
+      ) {
+        Zotero.Prefs.set(
+          "extensions.paperoutline.mineruTokenSavedAt",
+          String(Date.now()),
+          true
+        );
+      }
+
+      tokenElement.addEventListener("change", () => {
+        const token = String(tokenElement.value || "").trim();
+        Zotero.Prefs.set("extensions.paperoutline.mineruToken", token, true);
+        if (token !== this._mineruTokenSnapshot) {
+          Zotero.Prefs.set(
+            "extensions.paperoutline.mineruTokenSavedAt",
+            token ? String(Date.now()) : "0",
+            true
+          );
+          Zotero.Prefs.set("extensions.paperoutline.mineruTokenExpired", false, true);
+          Zotero.Prefs.set(
+            "extensions.paperoutline.mineruExpiryReminderAt",
+            "0",
+            true
+          );
+          this._mineruTokenSnapshot = token;
+        }
+        this.updateMineruStatus();
+      });
+
+      this.updateMineruStatus();
+    },
+
+    setMineruStatus(state, message) {
+      const status = byId("paper-outline-mineru-status");
+      if (!status) return;
+      status.dataset.state = state;
+      status.className = "paper-outline-status paper-outline-status-" + state;
+      status.textContent = message;
+    },
+
+    updateMineruStatus() {
+      const api = Zotero && Zotero.PaperOutlineGPT;
+      const tokenElement = byId("paper-outline-mineru-token");
+      const token = String((tokenElement && tokenElement.value) || "").trim();
+      if (!token) {
+        this.setMineruStatus(
+          "idle",
+          "尚未设置 MinerU。扫描 PDF 暂时无法生成总结和目录。"
+        );
+        return;
+      }
+      if (!api || typeof api.getMineruTokenStatus !== "function") {
+        this.setMineruStatus("dirty", "Token 已填写，重启 Zotero 后可检查状态。");
+        return;
+      }
+      const status = api.getMineruTokenStatus({ token });
+      if (status.state === "expired") {
+        this.setMineruStatus(
+          "error",
+          "Token 可能已到期，请前往 MinerU 重新创建并替换。"
+        );
+      } else if (status.state === "warning") {
+        this.setMineruStatus(
+          "dirty",
+          "Token 即将到期 · 按保存时间估算还剩 " +
+            status.daysLeft +
+            " 天（预计 " +
+            status.dateText +
+            " 到期）"
+        );
+      } else {
+        this.setMineruStatus(
+          "success",
+          "Token 已保存 · 按保存时间估算可用至 " + status.dateText
+        );
+      }
+    },
+
+    async testMineruConnection() {
+      if (this._mineruTesting) return;
+      const button = byId("paper-outline-mineru-test-button");
+      const tokenElement = byId("paper-outline-mineru-token");
+      const token = String((tokenElement && tokenElement.value) || "").trim();
+      const api = Zotero && Zotero.PaperOutlineGPT;
+
+      if (!token) {
+        this.setMineruStatus("error", "请先粘贴 MinerU Token。");
+        if (tokenElement) tokenElement.focus();
+        return;
+      }
+      if (!api || typeof api.testMineruConnection !== "function") {
+        this.setMineruStatus("error", "插件尚未完成加载，请重启 Zotero 后再试。");
+        return;
+      }
+
+      Zotero.Prefs.set("extensions.paperoutline.mineruToken", token, true);
+      if (token !== this._mineruTokenSnapshot) {
+        Zotero.Prefs.set(
+          "extensions.paperoutline.mineruTokenSavedAt",
+          String(Date.now()),
+          true
+        );
+        Zotero.Prefs.set("extensions.paperoutline.mineruTokenExpired", false, true);
+        Zotero.Prefs.set("extensions.paperoutline.mineruExpiryReminderAt", "0", true);
+        this._mineruTokenSnapshot = token;
+      }
+
+      this._mineruTesting = true;
+      if (button) {
+        button.disabled = true;
+        button.label = "正在检查…";
+      }
+      this.setMineruStatus("testing", "正在验证 MinerU Token，请稍候…");
+      try {
+        const result = await api.testMineruConnection({ token });
+        this.setMineruStatus(
+          "success",
+          "连接成功 · 按保存时间估算可用至 " + result.dateText
+        );
+      } catch (error) {
+        const message = String((error && error.message) || error || "未知错误")
+          .replace(/^Error:\s*/i, "")
+          .trim();
+        this.setMineruStatus("error", "检查失败：" + message);
+      } finally {
+        this._mineruTesting = false;
+        if (button) {
+          button.disabled = false;
+          button.label = "检查连接";
+        }
+      }
+    },
+
+    openMineruTokenPage() {
+      const api = Zotero && Zotero.PaperOutlineGPT;
+      if (api && typeof api.openMineruTokenPage === "function") {
+        api.openMineruTokenPage();
+      } else {
+        Zotero.launchURL("https://mineru.net/apiManage/token");
+      }
     },
 
     updateProvider(resetKnownDefault) {

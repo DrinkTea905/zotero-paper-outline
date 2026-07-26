@@ -6,7 +6,7 @@
   <groupbox>
     <html:header class="paper-outline-hero">
       <html:p class="paper-outline-subtitle">
-        自动生成论文总结与带页码的层级目录。首次使用请先连接 AI 服务并完成测试。
+        自动生成论文总结与带页码的层级目录；扫描 PDF 也可在授权后完成文字识别。
       </html:p>
     </html:header>
   </groupbox>
@@ -90,11 +90,83 @@
   </groupbox>
 
   <groupbox>
+    <html:section id="paper-outline-mineru-card"
+                  class="paper-outline-card"
+                  aria-labelledby="paper-outline-mineru-heading">
+      <html:div class="paper-outline-card-header">
+        <html:div>
+          <html:h2 id="paper-outline-mineru-heading" class="paper-outline-card-title">
+            <html:span class="paper-outline-step">2</html:span>识别扫描 PDF
+          </html:h2>
+          <html:p class="paper-outline-card-desc">
+            有些扫描论文只有页面图片，Paper Outline 看不到里面的文字。MinerU 可以先把这些页面识别成可阅读的文字，再继续生成总结和目录。
+          </html:p>
+        </html:div>
+      </html:div>
+
+      <html:div class="paper-outline-mineru-note">
+        <html:strong>什么时候会用到？</html:strong>
+        只有 PDF 没有可读取的文字时才会使用 MinerU；普通 PDF 不会上传。
+      </html:div>
+
+      <html:div class="paper-outline-form-grid paper-outline-mineru-form">
+        <html:label class="paper-outline-form-label" for="paper-outline-mineru-token">MinerU Token</html:label>
+        <html:div class="paper-outline-field-stack">
+          <html:input id="paper-outline-mineru-token"
+                      type="password"
+                      autocomplete="off"
+                      placeholder="粘贴从 MinerU 获取的 Token"
+                      preference="extensions.paperoutline.mineruToken"/>
+          <html:p class="paper-outline-hint">
+            仅保存在本机 Zotero 设置中。MinerU Token 有效期为 90 天，到期后需要重新创建。
+          </html:p>
+        </html:div>
+      </html:div>
+
+      <html:div class="paper-outline-action-row paper-outline-mineru-actions">
+        <button id="paper-outline-mineru-test-button"
+                label="检查连接"
+                oncommand="window.PaperOutlinePrefsUI.testMineruConnection()"/>
+        <button id="paper-outline-mineru-open-button"
+                class="paper-outline-link-button"
+                label="获取 MinerU Token ↗"
+                oncommand="window.PaperOutlinePrefsUI.openMineruTokenPage()"/>
+      </html:div>
+      <html:div id="paper-outline-mineru-status"
+                class="paper-outline-status paper-outline-status-idle"
+                data-state="idle"
+                role="status"
+                aria-live="polite">尚未设置 MinerU。扫描 PDF 暂时无法生成总结和目录。</html:div>
+
+      <html:div class="paper-outline-toggle-list paper-outline-mineru-toggle">
+        <html:div class="paper-outline-toggle-item">
+          <html:input id="paper-outline-mineru-auto-upload"
+                      class="paper-outline-toggle-control"
+                      type="checkbox"
+                      aria-labelledby="paper-outline-mineru-auto-upload-title"/>
+          <html:div class="paper-outline-toggle-copy">
+            <html:label for="paper-outline-mineru-auto-upload"
+                        id="paper-outline-mineru-auto-upload-title"
+                        class="paper-outline-toggle-title">扫描件默认上传至 MinerU 识别</html:label>
+            <html:p class="paper-outline-toggle-desc">
+              开启后，遇到没有文字层的 PDF 会自动上传识别；关闭后，每次上传前都会征求确认。
+            </html:p>
+          </html:div>
+        </html:div>
+      </html:div>
+
+      <html:p class="paper-outline-mineru-privacy">
+        使用 MinerU 时，当前扫描 PDF 会发送至 MinerU 完成文字识别，识别结果随后用于生成总结和目录。
+      </html:p>
+    </html:section>
+  </groupbox>
+
+  <groupbox>
     <html:section class="paper-outline-card" aria-labelledby="paper-outline-auto-heading">
       <html:div class="paper-outline-card-header">
         <html:div>
           <html:h2 id="paper-outline-auto-heading" class="paper-outline-card-title">
-            <html:span class="paper-outline-step">2</html:span>自动处理
+            <html:span class="paper-outline-step">3</html:span>自动处理
           </html:h2>
           <html:p class="paper-outline-card-desc">新文献存入 Zotero 后自动执行；关闭后仍可通过右键手动生成。</html:p>
         </html:div>
@@ -134,7 +206,7 @@
       <html:div class="paper-outline-card-header">
         <html:div>
           <html:h2 id="paper-outline-output-heading" class="paper-outline-card-title">
-            <html:span class="paper-outline-step">3</html:span>生成偏好
+            <html:span class="paper-outline-step">4</html:span>生成偏好
           </html:h2>
           <html:p class="paper-outline-card-desc">控制目录的详细程度；提示词模板仅在需要定制时修改。</html:p>
         </html:div>
@@ -293,6 +365,7 @@
           <html:ol>
             <html:li>选择 AI 服务商，粘贴 API Key；使用本地 Ollama 时无需 Key。</html:li>
             <html:li>点击“测试连接”，看到绿色的“连接成功”后再开始生成。</html:li>
+            <html:li>如需处理扫描论文，在“识别扫描 PDF”中设置 MinerU Token。</html:li>
             <html:li>保持“自动处理”开启，之后把带 PDF 的文献存入 Zotero 即可。</html:li>
           </html:ol>
 
@@ -305,7 +378,8 @@
           <html:h3>没有生成结果？</html:h3>
           <html:ul>
             <html:li>先重新测试连接；错误信息会提示 Key、余额、模型名或接口地址问题。</html:li>
-            <html:li>PDF 需要有可提取的文字层；纯扫描件请先 OCR。</html:li>
+            <html:li>扫描 PDF 没有可读取的文字；设置 MinerU 后，插件可以先识别文字再继续生成。</html:li>
+            <html:li>MinerU Token 有效期为 90 天；插件会记录保存时间，并在临近到期时提醒更换。</html:li>
             <html:li>目录会自动缓存，重新打开同一篇 PDF 时无需重复生成。</html:li>
           </html:ul>
         </html:div>
