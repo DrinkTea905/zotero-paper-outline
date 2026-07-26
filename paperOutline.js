@@ -2296,19 +2296,112 @@ var PaperOutline = {
     }
   },
 
-  async _downloadMineruResult(zipUrl) {
-    let xhr;
+  _mineruDownloadBody(xhr) {
     try {
-      xhr = await Zotero.HTTP.request("GET", zipUrl, {
-        responseType: "arraybuffer",
-        timeout: 10 * 60 * 1000,
-      });
-    } catch (error) {
-      throw new Error("识别结果下载失败，请检查网络后重试。");
+      if (xhr && xhr.response) {
+        return new TextDecoder("utf-8").decode(new Uint8Array(xhr.response));
+      }
+    } catch (e) {}
+    return "";
+  },
+
+  _mineruDownloadError(status, responseText) {
+    const body = String(responseText || "");
+    const codeMatch = body.match(/<Code>\s*([^<]+)\s*<\/Code>/i);
+    const code = codeMatch ? codeMatch[1].trim() : "";
+    const suffix =
+      status || code
+        ? "（" +
+          (status ? "HTTP " + status : "") +
+          (status && code ? " / " : "") +
+          (code || "") +
+          "）"
+        : "";
+    if (status === 401 || status === 403) {
+      return "MinerU 识别结果链接已失效或被拒绝" + suffix + "，请重新生成。";
     }
-    const data = xhr.response || (xhr.xmlhttp && xhr.xmlhttp.response);
-    if (!data) throw new Error("MinerU 没有返回可用的识别结果。");
-    return await this._readMineruZip(data);
+    if (status === 404 || code === "NoSuchKey") {
+      return "MinerU 识别结果已过期或不存在" + suffix + "，请重新生成。";
+    }
+    if (status === 429) {
+      return "MinerU 结果下载请求较多" + suffix + "，请稍后重试。";
+    }
+    if (status >= 500) {
+      return "MinerU 结果服务器暂时不可用" + suffix + "，请稍后重试。";
+    }
+    if (status === 0) {
+      return "无法连接 MinerU 结果服务器，请检查网络或代理后重试。";
+    }
+    return "识别结果下载失败" + suffix + "，请稍后重试。";
+  },
+
+  _downloadMineruBytes(zipUrl) {
+    // 结果位于 MinerU CDN。使用匿名原生 XHR，避免携带 Zotero 的 Cookie 或附加请求头。
+    return new Promise((resolve, reject) => {
+      let xhr;
+      const fail = (status, message, retryable) => {
+        const error = new Error(
+          message || this._mineruDownloadError(status, this._mineruDownloadBody(xhr))
+        );
+        error.status = status || 0;
+        error.retryable = !!retryable;
+        reject(error);
+      };
+      try {
+        xhr = new XMLHttpRequest({ mozAnon: true });
+        xhr.mozBackgroundRequest = true;
+        xhr.open("GET", zipUrl, true);
+        xhr.responseType = "arraybuffer";
+        xhr.timeout = 10 * 60 * 1000;
+        xhr.onload = () => {
+          if (xhr.status >= 200 && xhr.status < 300 && xhr.response) {
+            resolve(xhr.response);
+            return;
+          }
+          const retryable =
+            xhr.status === 0 ||
+            xhr.status === 408 ||
+            xhr.status === 429 ||
+            xhr.status >= 500;
+          fail(xhr.status, "", retryable);
+        };
+        xhr.onerror = () => fail(xhr.status || 0, "", true);
+        xhr.ontimeout = () =>
+          fail(0, "MinerU 识别结果下载超时，请检查网络后重试。", true);
+        xhr.onabort = () => fail(0, "MinerU 识别结果下载已取消。", false);
+        xhr.send();
+      } catch (error) {
+        fail(
+          (xhr && xhr.status) || 0,
+          this._mineruDownloadError(
+            (xhr && xhr.status) || 0,
+            (error && error.message) || ""
+          ),
+          true
+        );
+      }
+    });
+  },
+
+  async _downloadMineruResult(zipUrl, onText) {
+    let lastError = null;
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      try {
+        const data = await this._downloadMineruBytes(zipUrl);
+        if (!data || !data.byteLength) {
+          throw new Error("MinerU 返回了空的识别结果，请重新生成。");
+        }
+        return await this._readMineruZip(data);
+      } catch (error) {
+        lastError = error;
+        if (!error.retryable || attempt >= 3) break;
+        if (onText) {
+          onText("MinerU 结果暂时无法取回，正在重试（" + attempt + "/2）…");
+        }
+        await this._sleep(attempt * 2000);
+      }
+    }
+    throw lastError || new Error("识别结果下载失败，请稍后重试。");
   },
 
   async _recognizeWithMineru(att, opts) {
@@ -2362,7 +2455,7 @@ var PaperOutline = {
     await this._uploadMineruFile(uploadUrl, path);
     const zipUrl = await this._waitForMineruResult(batchID, token, opts.onText);
     if (opts.onText) opts.onText("正在读取识别结果…");
-    const result = await this._downloadMineruResult(zipUrl);
+    const result = await this._downloadMineruResult(zipUrl, opts.onText);
     if (!result.text || !result.text.trim()) {
       throw new Error("MinerU 已完成识别，但没有识别出可用文字。");
     }
