@@ -2024,20 +2024,87 @@ var PaperOutline = {
     return path;
   },
 
+  _mineruUploadError(status, responseText) {
+    const body = String(responseText || "");
+    const codeMatch = body.match(/<Code>\s*([^<]+)\s*<\/Code>/i);
+    const code = codeMatch ? codeMatch[1].trim() : "";
+    if (status === 413 || code === "EntityTooLarge") {
+      return "这份 PDF 超过 MinerU 当前允许的文件大小。";
+    }
+    if (code === "RequestTimeTooSkewed") {
+      return "电脑时间与网络时间相差较大，请校准系统时间后重试。";
+    }
+    if (
+      status === 403 ||
+      code === "SignatureDoesNotMatch" ||
+      code === "AccessDenied" ||
+      code === "InvalidAccessKeyId"
+    ) {
+      return (
+        "MinerU 未接受这次上传" +
+        (status ? "（HTTP " + status + (code ? " / " + code : "") + "）" : "") +
+        "，请重新发起；如果仍然失败，请检查网络或代理。"
+      );
+    }
+    if (status === 400) {
+      return (
+        "MinerU 认为上传请求不完整" +
+        (code ? "（" + code + "）" : "") +
+        "，请重新发起。"
+      );
+    }
+    if (status === 0) return "PDF 上传失败，请检查网络或代理后重试。";
+    return (
+      "PDF 上传失败" +
+      (status ? "（HTTP " + status + (code ? " / " + code : "") + "）" : "") +
+      "，请稍后重试。"
+    );
+  },
+
   async _uploadMineruFile(uploadUrl, path) {
     const bytes = await IOUtils.read(path);
-    try {
-      await Zotero.HTTP.request("PUT", uploadUrl, {
-        body: bytes,
-        responseType: "text",
-        timeout: 10 * 60 * 1000,
-      });
-    } catch (error) {
-      const status =
-        (error && error.xmlhttp && error.xmlhttp.status) || (error && error.status) || 0;
-      if (status === 0) throw new Error("PDF 上传失败，请检查网络后重试。");
-      throw new Error("PDF 上传失败，请稍后重试。");
-    }
+    // MinerU 的临时上传地址明确要求不要设置 Content-Type。
+    // Zotero.HTTP.request() 会在有请求体时自动补上该请求头，因此这里直接使用原生 XHR。
+    return await new Promise((resolve, reject) => {
+      let xhr;
+      try {
+        xhr = new XMLHttpRequest({ mozAnon: true });
+        xhr.mozBackgroundRequest = true;
+        xhr.open("PUT", uploadUrl, true);
+        xhr.responseType = "text";
+        xhr.timeout = 10 * 60 * 1000;
+        xhr.onload = () => {
+          if (xhr.status >= 200 && xhr.status < 300) {
+            resolve();
+            return;
+          }
+          const error = new Error(
+            this._mineruUploadError(xhr.status, xhr.responseText)
+          );
+          error.status = xhr.status;
+          reject(error);
+        };
+        xhr.onerror = () => {
+          const error = new Error(
+            this._mineruUploadError(xhr.status || 0, xhr.responseText)
+          );
+          error.status = xhr.status || 0;
+          reject(error);
+        };
+        xhr.ontimeout = () => reject(new Error("PDF 上传超时，请检查网络后重试。"));
+        xhr.onabort = () => reject(new Error("PDF 上传已取消。"));
+        xhr.send(bytes);
+      } catch (error) {
+        reject(
+          new Error(
+            this._mineruUploadError(
+              (xhr && xhr.status) || 0,
+              (xhr && xhr.responseText) || (error && error.message)
+            )
+          )
+        );
+      }
+    });
   },
 
   async _waitForMineruResult(batchID, token, onText) {
