@@ -382,6 +382,15 @@
             <html:li>MinerU Token 有效期为 90 天；插件会记录保存时间，并在临近到期时提醒更换。</html:li>
             <html:li>目录会自动缓存，重新打开同一篇 PDF 时无需重复生成。</html:li>
           </html:ul>
+
+          <html:h3>提示“无法连接 MinerU 结果服务器”？</html:h3>
+          <html:ul>
+            <html:li>多数用户无需进行额外设置；只有出现这条提示时，才需要检查当前网络。</html:li>
+            <html:li>如果正在使用代理、VPN 或网络加速工具，可先暂时关闭后重试。关闭后恢复正常，通常说明识别结果的下载地址被代理影响。</html:li>
+            <html:li>请在所用工具的“直连”“绕过代理”或“排除列表”中加入 <html:code>cdn-mineru.openxlab.org.cn</html:code>。</html:li>
+            <html:li>使用 Clash 时，可添加规则 <html:code>DOMAIN,cdn-mineru.openxlab.org.cn,DIRECT</html:code>，并使用“规则”模式；其他工具请使用含义相同的直连设置。</html:li>
+            <html:li>没有使用代理仍然失败时，可稍后重试、切换网络，或检查安全软件是否限制 Zotero 联网。</html:li>
+          </html:ul>
         </html:div>
       </html:details>
     </html:section>
