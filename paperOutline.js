@@ -112,13 +112,18 @@ var PaperOutline = {
   // Zotero 7：退化为逐窗口注入 #zotero-itemmenu
   MENU_LABEL: "📑 AI 生成目录",
   SUMMARY_MENU_LABEL: "📝 AI 整篇总结 → 笔记",
+  REVIVE_MENU_LABEL: "🔄 重新唤起 Paper Outline",
   _menuID: "paper-outline-menu",
+  _reviveMenuID: "paper-outline-revive-menu",
+  _reviveReaderMenuID: "paper-outline-revive-reader-menu",
+  _registeredMenuIDs: [],
   _usedMenuManager: false,
 
   registerMenu() {
     if (Zotero.MenuManager && typeof Zotero.MenuManager.registerMenu === "function") {
       try {
-        Zotero.MenuManager.registerMenu({
+        this._registeredMenuIDs = [];
+        const itemMenuID = Zotero.MenuManager.registerMenu({
           menuID: this._menuID,
           pluginID: this.id,
           target: "main/library/item", // 条目右键菜单
@@ -161,10 +166,42 @@ var PaperOutline = {
             },
           ],
         });
+        this._registeredMenuIDs.push(itemMenuID || this._menuID);
+
+        const reviveMenu = (target, menuID) => {
+          const registeredID = Zotero.MenuManager.registerMenu({
+            menuID,
+            pluginID: this.id,
+            target,
+            menus: [
+              {
+                menuType: "menuitem",
+                label: this.REVIVE_MENU_LABEL,
+                onShowing: (event, context) => {
+                  try {
+                    if (context && context.menuElem) {
+                      context.menuElem.setAttribute("label", PaperOutline.REVIVE_MENU_LABEL);
+                    }
+                  } catch (e) {}
+                },
+                onCommand: (event) => PaperOutline.reviveReaderFeatures(event),
+              },
+            ],
+          });
+          this._registeredMenuIDs.push(registeredID || menuID);
+        };
+        reviveMenu("main/menubar/tools", this._reviveMenuID);
+        reviveMenu("reader/menubar/view", this._reviveReaderMenuID);
         this._usedMenuManager = true;
-        this.log("menu registered via MenuManager");
+        this.log("menus registered via MenuManager");
         return;
       } catch (e) {
+        try {
+          for (const menuID of this._registeredMenuIDs) {
+            try { Zotero.MenuManager.unregisterMenu(menuID); } catch (e3) {}
+          }
+        } catch (e2) {}
+        this._registeredMenuIDs = [];
         this.log("MenuManager.registerMenu failed, fallback to DOM: " + e);
       }
     }
@@ -176,10 +213,15 @@ var PaperOutline = {
   unregisterMenu() {
     try {
       if (this._usedMenuManager && Zotero.MenuManager && Zotero.MenuManager.unregisterMenu) {
-        Zotero.MenuManager.unregisterMenu(this._menuID);
-      } else {
-        this.removeFromAllWindows();
+        const menuIDs = this._registeredMenuIDs.length
+          ? this._registeredMenuIDs
+          : [this._menuID, this._reviveMenuID, this._reviveReaderMenuID];
+        for (const menuID of menuIDs) {
+          try { Zotero.MenuManager.unregisterMenu(menuID); } catch (e2) {}
+        }
       }
+      this._registeredMenuIDs = [];
+      this.removeFromAllWindows();
     } catch (e) {
       this.log("unregisterMenu error: " + e);
     }
@@ -189,20 +231,35 @@ var PaperOutline = {
   addToWindow(window) {
     try {
       const doc = window.document;
-      if (doc.getElementById("paper-outline-menuitem")) return;
       const itemMenu = doc.getElementById("zotero-itemmenu");
-      if (!itemMenu) return;
-      const ms = doc.createXULElement("menuitem");
-      ms.id = "paper-outline-summary-menuitem";
-      ms.setAttribute("label", this.SUMMARY_MENU_LABEL);
-      ms.addEventListener("command", () => this.runSummaryOnSelected());
-      itemMenu.appendChild(ms);
-      const mi = doc.createXULElement("menuitem");
-      mi.id = "paper-outline-menuitem";
-      mi.setAttribute("label", this.MENU_LABEL);
-      mi.addEventListener("command", () => this.runOnSelected());
-      itemMenu.appendChild(mi);
-      this._addedWindows.add(window);
+      if (itemMenu && !doc.getElementById("paper-outline-menuitem")) {
+        const ms = doc.createXULElement("menuitem");
+        ms.id = "paper-outline-summary-menuitem";
+        ms.setAttribute("label", this.SUMMARY_MENU_LABEL);
+        ms.addEventListener("command", () => this.runSummaryOnSelected());
+        itemMenu.appendChild(ms);
+        const mi = doc.createXULElement("menuitem");
+        mi.id = "paper-outline-menuitem";
+        mi.setAttribute("label", this.MENU_LABEL);
+        mi.addEventListener("command", () => this.runOnSelected());
+        itemMenu.appendChild(mi);
+      }
+
+      const toolsMenu = doc.getElementById("menu_ToolsPopup");
+      if (toolsMenu && !doc.getElementById("paper-outline-revive-menuitem")) {
+        const revive = doc.createXULElement("menuitem");
+        revive.id = "paper-outline-revive-menuitem";
+        revive.setAttribute("label", this.REVIVE_MENU_LABEL);
+        revive.addEventListener("command", (event) => this.reviveReaderFeatures(event));
+        toolsMenu.appendChild(revive);
+      }
+
+      if (
+        doc.getElementById("paper-outline-menuitem") ||
+        doc.getElementById("paper-outline-revive-menuitem")
+      ) {
+        this._addedWindows.add(window);
+      }
     } catch (e) {
       this.log("addToWindow error: " + e);
     }
@@ -212,6 +269,7 @@ var PaperOutline = {
     try {
       window.document.getElementById("paper-outline-menuitem")?.remove();
       window.document.getElementById("paper-outline-summary-menuitem")?.remove();
+      window.document.getElementById("paper-outline-revive-menuitem")?.remove();
       this._addedWindows.delete(window);
     } catch (e) {
       this.log("removeFromWindow error: " + e);
@@ -244,6 +302,100 @@ var PaperOutline = {
     } catch (e) {
       this.log("registerReaderOutline error: " + e);
     }
+  },
+
+  _getReaderReviveTargets(event) {
+    let readers = [];
+    try {
+      readers = Array.from((Zotero.Reader && Zotero.Reader._readers) || []).filter(
+        (reader) => reader && reader.type === "pdf"
+      );
+    } catch (e) {}
+
+    // 独立阅读器中调用时只恢复该窗口；阅读器标签页中调用时只恢复当前 PDF。
+    try {
+      const win = Zotero.getMainWindow && Zotero.getMainWindow();
+      const commandWindow =
+        (event && event.target && event.target.ownerGlobal) || (event && event.view) || null;
+      if (commandWindow && commandWindow !== win) {
+        const detached = readers.find(
+          (reader) => !reader.tabID && reader._window === commandWindow
+        );
+        if (detached) return [detached];
+      }
+      const tabID = win && win.Zotero_Tabs && win.Zotero_Tabs.selectedID;
+      const current =
+        tabID && Zotero.Reader && typeof Zotero.Reader.getByTabID === "function"
+          ? Zotero.Reader.getByTabID(tabID)
+          : null;
+      if (current && current.type === "pdf") return [current];
+    } catch (e) {}
+    return readers;
+  },
+
+  async _reviveOneReader(reader, activateOutline) {
+    if (!reader || reader.type !== "pdf") return false;
+    await this._injectReaderOutline(reader);
+
+    const rw = reader._iframeWindow;
+    const doc = rw && rw.document;
+    if (!doc) return false;
+
+    try { this._injectDespaceButton({ doc, reader }); } catch (e) {}
+    try { this._injectAnnotCleanButton({ doc, reader }); } catch (e) {}
+
+    if (activateOutline) {
+      try {
+        const outlineTab = doc.getElementById("viewOutline");
+        if (outlineTab && typeof outlineTab.click === "function") outlineTab.click();
+      } catch (e) {}
+    }
+
+    // Zotero 的 React 视图可能在点击标签后再次替换 DOM，分阶段补挂且保持幂等。
+    const retry = async () => {
+      try {
+        await PaperOutline._injectReaderOutline(reader);
+        const currentDoc = reader._iframeWindow && reader._iframeWindow.document;
+        if (currentDoc) {
+          PaperOutline._injectDespaceButton({ doc: currentDoc, reader });
+          PaperOutline._injectAnnotCleanButton({ doc: currentDoc, reader });
+        }
+      } catch (e) {
+        PaperOutline.log("revive retry: " + e);
+      }
+    };
+    try {
+      rw.setTimeout(retry, 80);
+      rw.setTimeout(retry, 260);
+      rw.setTimeout(retry, 700);
+    } catch (e) {}
+    return true;
+  },
+
+  async reviveReaderFeatures(event) {
+    const readers = this._getReaderReviveTargets(event);
+    if (!readers.length) {
+      this._toast("Paper Outline · 未找到 PDF", "请先打开一篇 PDF，再使用重新唤起功能");
+      return 0;
+    }
+
+    let revived = 0;
+    for (const reader of readers) {
+      try {
+        if (await this._reviveOneReader(reader, true)) revived++;
+      } catch (e) {
+        this.log("reviveReaderFeatures: " + e);
+      }
+    }
+    if (revived) {
+      this._toast(
+        "Paper Outline · 已重新唤起",
+        revived === 1 ? "已刷新当前 PDF 的目录栏和工具按钮" : "已刷新 " + revived + " 个 PDF 阅读器"
+      );
+    } else {
+      this._toast("Paper Outline · 唤起失败", "请关闭当前 PDF 标签页后重试");
+    }
+    return revived;
   },
 
   // 解析当前 reader 的 pdf.js PDFViewerApplication（多路径兜底：不同 Zotero 版本属性名有别）
@@ -397,8 +549,8 @@ var PaperOutline = {
       try {
         const app1 = this._getReaderApp(reader);
         const eb = app1 && app1.eventBus;
-        if (eb && !reader._poEbHooked) {
-          reader._poEbHooked = true;
+        if (eb && reader._poEnsureEventBus !== eb) {
+          reader._poEnsureEventBus = eb;
           eb.on("documentloaded", () => rw.setTimeout(ensureInjected, 80));
         }
       } catch (e2) {}
@@ -407,8 +559,8 @@ var PaperOutline = {
       try {
         const app2 = this._getReaderApp(reader);
         const eb2 = app2 && app2.eventBus;
-        if (eb2 && !reader._poPageHooked) {
-          reader._poPageHooked = true;
+        if (eb2 && reader._poPageEventBus !== eb2) {
+          reader._poPageEventBus = eb2;
           eb2.on("pagechanging", (e) => {
             const pn =
               (e && (e.pageNumber || e.pageLabel)) ||
