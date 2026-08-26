@@ -342,6 +342,7 @@ var PaperOutline = {
     if (!doc) return false;
 
     try { this._injectDespaceButton({ doc, reader }); } catch (e) {}
+    try { this._injectReaderInfoPanel({ doc, reader }); } catch (e) {}
     try { this._injectAnnotCleanButton({ doc, reader }); } catch (e) {}
 
     if (activateOutline) {
@@ -358,6 +359,7 @@ var PaperOutline = {
         const currentDoc = reader._iframeWindow && reader._iframeWindow.document;
         if (currentDoc) {
           PaperOutline._injectDespaceButton({ doc: currentDoc, reader });
+          PaperOutline._injectReaderInfoPanel({ doc: currentDoc, reader });
           PaperOutline._injectAnnotCleanButton({ doc: currentDoc, reader });
         }
       } catch (e) {
@@ -3027,6 +3029,151 @@ var PaperOutline = {
   // ════════════════════════════════════════════════════════════════
   DESPACE_BTN_ID: "paper-outline-despace-btn",
   ANNOT_BTN_ID: "paper-outline-despace-annot-bar",
+  READER_INFO_ID: "paper-outline-reader-info",
+  READER_INFO_TEXT_ID: "paper-outline-reader-info-text",
+  READER_INFO_COPY_ID: "paper-outline-reader-info-copy",
+
+  // 读取当前 PDF 对应条目的「题名 - 作者 - 年份」，与 Zotero 标签页提示信息保持一致。
+  _getReaderInfoText(reader) {
+    try {
+      const att = reader && reader._item;
+      const item = (att && att.parentItem) || att;
+      if (!item) return "";
+      const getField = (field, ...args) => {
+        try {
+          return typeof item.getField === "function" ? item.getField(field, ...args) : "";
+        } catch (e) {
+          return "";
+        }
+      };
+      const tidy = (value) => String(value || "").replace(/\s+/g, " ").trim();
+      let title = tidy(getField("title"));
+      if (!title && typeof item.getDisplayTitle === "function") {
+        try { title = tidy(item.getDisplayTitle()); } catch (e) {}
+      }
+      const creator = tidy(getField("firstCreator") || item.firstCreator);
+      const date = tidy(getField("date", true, true) || getField("date"));
+      const yearMatch = date.match(/(?:^|\D)((?:1[5-9]|20|21)\d{2})(?=\D|$)/);
+      const year = yearMatch && yearMatch[1] !== "0000" ? yearMatch[1] : "";
+      return [title, creator, year].filter(Boolean).join(" - ");
+    } catch (e) {
+      this.log("getReaderInfoText: " + e);
+      return "";
+    }
+  },
+
+  copyReaderInfo(reader) {
+    try {
+      const text = this._getReaderInfoText(reader);
+      if (!text) {
+        this._toast("文献信息 · 无法复制", "当前 PDF 没有可用的题名、作者或年份");
+        return "";
+      }
+      const UI = Zotero.Utilities && Zotero.Utilities.Internal;
+      if (!UI || typeof UI.copyTextToClipboard !== "function") {
+        throw new Error("剪贴板接口不可用");
+      }
+      UI.copyTextToClipboard(text);
+      this._toast("文献信息 · 已复制", text);
+      return text;
+    } catch (e) {
+      this.log("copyReaderInfo: " + e);
+      this._toast("文献信息 · 复制失败", String(e));
+      return "";
+    }
+  },
+
+  _makeReaderInfoPanel(doc, reader) {
+    const panel = doc.createElement("div");
+    panel.id = this.READER_INFO_ID;
+    panel.style.cssText =
+      "height:26px;display:flex;align-items:center;box-sizing:border-box;overflow:hidden;" +
+      "flex:0 1 310px;min-width:150px;max-width:min(310px,30vw);margin-left:4px;" +
+      "border:1px solid var(--fill-quarternary,#d5d5d5);border-radius:7px;" +
+      "background:var(--material-sidepane,rgba(255,255,255,.78));color:var(--fill-primary,#333);";
+
+    const text = doc.createElement("span");
+    text.id = this.READER_INFO_TEXT_ID;
+    text.style.cssText =
+      "min-width:0;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" +
+      "padding:0 8px;font-size:12px;line-height:24px;user-select:text;";
+
+    const copy = doc.createElement("button");
+    copy.id = this.READER_INFO_COPY_ID;
+    copy.setAttribute("type", "button");
+    copy.setAttribute("tabindex", "-1");
+    copy.setAttribute("aria-label", "复制当前文献信息");
+    copy.style.cssText =
+      "height:24px;flex:none;display:inline-flex;align-items:center;gap:4px;padding:0 8px;" +
+      "border:0;border-left:1px solid var(--fill-quarternary,#d5d5d5);border-radius:0 6px 6px 0;" +
+      "background:transparent;color:var(--accent-blue,#2e7dd1);font-size:11.5px;cursor:pointer;";
+    copy.innerHTML =
+      '<svg width="13" height="13" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">' +
+      '<rect x="5.2" y="4.8" width="7.3" height="8" rx="1.4" stroke="currentColor" stroke-width="1.35"/>' +
+      '<path d="M10.4 4.8V3.6c0-.8-.6-1.4-1.4-1.4H4.1c-.8 0-1.4.6-1.4 1.4v6.1c0 .8.6 1.4 1.4 1.4h1.1" stroke="currentColor" stroke-width="1.35" stroke-linecap="round"/>' +
+      '</svg><span>复制</span>';
+    copy.addEventListener("mouseenter", () => { if (!copy.disabled) copy.style.background = "rgba(46,125,209,.10)"; });
+    copy.addEventListener("mouseleave", () => { copy.style.background = "transparent"; });
+    copy.addEventListener("click", (event) => {
+      try { event.preventDefault(); event.stopPropagation(); } catch (e) {}
+      PaperOutline.copyReaderInfo(reader);
+    });
+
+    panel.appendChild(text);
+    panel.appendChild(copy);
+    this._updateReaderInfoPanel(panel, reader);
+    return panel;
+  },
+
+  _updateReaderInfoPanel(panel, reader) {
+    if (!panel) return;
+    const text = this._getReaderInfoText(reader);
+    const shown = text || "当前 PDF 无可复制的题录信息";
+    const label = panel.querySelector && panel.querySelector("#" + this.READER_INFO_TEXT_ID);
+    const copy = panel.querySelector && panel.querySelector("#" + this.READER_INFO_COPY_ID);
+    if (label) {
+      label.textContent = shown;
+      label.setAttribute("title", shown);
+    }
+    panel.setAttribute("title", shown);
+    if (copy) {
+      copy.disabled = !text;
+      copy.style.opacity = text ? "1" : ".45";
+      copy.style.cursor = text ? "pointer" : "default";
+      copy.setAttribute("title", text ? "复制：" + text : "当前 PDF 无可复制的题录信息");
+    }
+  },
+
+  _injectReaderInfoPanel(event) {
+    const doc = event && event.doc;
+    const reader = event && event.reader;
+    if (!doc) return;
+    let panel = doc.getElementById(this.READER_INFO_ID);
+    if (!panel) panel = this._makeReaderInfoPanel(doc, reader);
+    else this._updateReaderInfoPanel(panel, reader);
+
+    const center = doc.querySelector(".center.tools") || doc.querySelector(".toolbar .center");
+    if (center) {
+      const cat = doc.getElementById(this.DESPACE_BTN_ID);
+      const before = cat && cat.parentNode === center ? cat.nextSibling : center.firstChild;
+      if (panel.parentNode === center && before === panel) return;
+      center.insertBefore(panel, before);
+      return;
+    }
+
+    const cat = doc.getElementById(this.DESPACE_BTN_ID);
+    if (cat && cat.parentNode) {
+      if (panel.parentNode === cat.parentNode && cat.nextSibling === panel) return;
+      cat.parentNode.insertBefore(panel, cat.nextSibling);
+      return;
+    }
+    const anchor = doc.getElementById("numPages") || doc.getElementById("pageNumber");
+    if (anchor && anchor.parentNode) {
+      anchor.parentNode.insertBefore(panel, anchor.nextSibling);
+    } else if (typeof event.append === "function") {
+      event.append(panel);
+    }
+  },
 
   // 核心：去掉中文之间、以及中文与英文/数字之间的多余空白。中英之间不留空格。
   cleanSpaces(text) {
@@ -3090,24 +3237,28 @@ var PaperOutline = {
     }
   },
 
-  // 造一个工具栏按钮：粉色小猫图标（醒目）
+  // 统一的小猫图标：轮廓更清楚，在浅色/深色工具栏上都保持辨识度。
+  _catIconSVG(size) {
+    const px = parseInt(size, 10) || 20;
+    return (
+      '<svg width="' + px + '" height="' + px + '" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">' +
+      '<path d="M5.3 9.2 4.7 4.6l4.35 2.48A8.7 8.7 0 0 1 12 6.55c1.06 0 2.05.18 2.95.53L19.3 4.6l-.6 4.6c.92 1.06 1.42 2.4 1.42 3.82 0 4-3.5 6.58-8.12 6.58S3.88 17.02 3.88 13.02c0-1.42.5-2.76 1.42-3.82Z" fill="#FF86C2" stroke="#D9438E" stroke-width="1.35" stroke-linejoin="round"/>' +
+      '<path d="m6.15 6.48 1.92 1.1-1.66.94-.26-2.04Zm11.7 0-1.92 1.1 1.66.94.26-2.04Z" fill="#FFD3E8"/>' +
+      '<circle cx="8.75" cy="12.45" r=".95" fill="#57354A"/><circle cx="15.25" cy="12.45" r=".95" fill="#57354A"/>' +
+      '<path d="m11.05 14.45.95.72.95-.72" stroke="#B52F78" stroke-width="1.15" stroke-linecap="round" stroke-linejoin="round"/>' +
+      '<path d="M12 15.2c-.55.82-1.5 1.03-2.27.46M12 15.2c.55.82 1.5 1.03 2.27.46M7.8 14.65l-2.3-.25m2.42 1.22-2.17.47m10.45-1.44 2.3-.25m-2.42 1.22 2.17.47" stroke="#8F5476" stroke-width=".75" stroke-linecap="round"/>' +
+      '</svg>'
+    );
+  },
+
+  // 造一个工具栏按钮：新版粉色小猫图标（醒目）
   _makeDespaceButton(doc) {
     const btn = doc.createElement("button");
     btn.id = this.DESPACE_BTN_ID;
     btn.className = "toolbar-button";
     btn.setAttribute("title", "去除文字空格：点我清理刚复制的文字");
     btn.setAttribute("tabindex", "-1");
-    // 粉色小猫（耳朵+脸+眼睛+鼻子+胡须）
-    btn.innerHTML =
-      '<svg width="20" height="20" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">' +
-      '<path d="M4 3.8 L9.4 9 L4 10.4 Z" fill="#ff6fb5"/>' +
-      '<path d="M20 3.8 L14.6 9 L20 10.4 Z" fill="#ff6fb5"/>' +
-      '<path d="M12 5.6 C16.5 5.6 19.2 8.8 19.2 13 C19.2 17.3 16 19.9 12 19.9 C8 19.9 4.8 17.3 4.8 13 C4.8 8.8 7.5 5.6 12 5.6 Z" fill="#ff90d0"/>' +
-      '<circle cx="9.4" cy="12.4" r="1.05" fill="#48243d"/>' +
-      '<circle cx="14.6" cy="12.4" r="1.05" fill="#48243d"/>' +
-      '<path d="M11 15 L13 15 L12 16.2 Z" fill="#e03a8e"/>' +
-      '<path d="M5.2 12.9 L8.4 13.1 M5.3 14.3 L8.4 14 M18.8 12.9 L15.6 13.1 M18.7 14.3 L15.6 14" stroke="#f0a6d2" stroke-width="0.6" stroke-linecap="round"/>' +
-      "</svg>";
+    btn.innerHTML = this._catIconSVG(20);
     btn.addEventListener("click", (e) => {
       try { e.preventDefault(); e.stopPropagation(); } catch (er) {}
       PaperOutline.cleanClipboardSpaces();
@@ -3203,15 +3354,7 @@ var PaperOutline = {
     btn.onmouseover = () => { btn.style.background = "#fff0f7"; };
     btn.onmouseout = () => { btn.style.background = "#fff"; };
     btn.setAttribute("title", "把本 PDF 所有标注里的空格一次性去除");
-    btn.innerHTML =
-      '<svg width="18" height="18" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">' +
-      '<path d="M4 3.8 L9.4 9 L4 10.4 Z" fill="#ff6fb5"/>' +
-      '<path d="M20 3.8 L14.6 9 L20 10.4 Z" fill="#ff6fb5"/>' +
-      '<path d="M12 5.6 C16.5 5.6 19.2 8.8 19.2 13 C19.2 17.3 16 19.9 12 19.9 C8 19.9 4.8 17.3 4.8 13 C4.8 8.8 7.5 5.6 12 5.6 Z" fill="#ff90d0"/>' +
-      '<circle cx="9.4" cy="12.4" r="1.05" fill="#48243d"/>' +
-      '<circle cx="14.6" cy="12.4" r="1.05" fill="#48243d"/>' +
-      '<path d="M11 15 L13 15 L12 16.2 Z" fill="#e03a8e"/>' +
-      "</svg><span>去除全部标注空格</span>";
+    btn.innerHTML = this._catIconSVG(18) + "<span>去除全部标注空格</span>";
     btn.addEventListener("click", (e) => {
       try { e.preventDefault(); e.stopPropagation(); } catch (er) {}
       PaperOutline.cleanAllAnnotations(event.reader);
@@ -3229,6 +3372,7 @@ var PaperOutline = {
         (event) => {
           if (typeof PaperOutline === "undefined") return;
           try { PaperOutline._injectDespaceButton(event); } catch (e) { PaperOutline.log("despace btn: " + e); }
+          try { PaperOutline._injectReaderInfoPanel(event); } catch (e) { PaperOutline.log("reader info: " + e); }
         },
         this.id
       );
@@ -3246,7 +3390,11 @@ var PaperOutline = {
         (Zotero.Reader._readers || []).forEach((r) => {
           try {
             const d = r && r._iframeWindow && r._iframeWindow.document;
-            if (d) { PaperOutline._injectDespaceButton({ doc: d }); PaperOutline._injectAnnotCleanButton({ doc: d, reader: r }); }
+            if (d) {
+              PaperOutline._injectDespaceButton({ doc: d, reader: r });
+              PaperOutline._injectReaderInfoPanel({ doc: d, reader: r });
+              PaperOutline._injectAnnotCleanButton({ doc: d, reader: r });
+            }
           } catch (e) {}
         });
       } catch (e) {}
@@ -3267,6 +3415,8 @@ var PaperOutline = {
           if (b) b.remove();
           const bar = d.getElementById(this.ANNOT_BTN_ID);
           if (bar) bar.remove();
+          const info = d.getElementById(this.READER_INFO_ID);
+          if (info) info.remove();
         } catch (e) {}
       });
     } catch (e) {}
