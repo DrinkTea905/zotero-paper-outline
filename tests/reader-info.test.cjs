@@ -33,6 +33,7 @@ class MockElement {
   }
 
   setAttribute(name, value) { this.attributes[name] = String(value); }
+  getAttribute(name) { return this.attributes[name] || null; }
   addEventListener(type, listener, options) {
     this.listeners[type] = listener;
     this.listenerOptions = this.listenerOptions || {};
@@ -66,8 +67,32 @@ class MockElement {
 }
 
 class MockDocument {
-  constructor(center) { this.center = center; }
+  constructor(center) {
+    this.center = center;
+    this.listeners = {};
+    this.listenerOptions = {};
+    const listeners = {};
+    const listenerOptions = {};
+    this.defaultView = {
+      listeners,
+      listenerOptions,
+      addEventListener(type, listener, options) {
+        listeners[type] = listener;
+        listenerOptions[type] = options;
+      },
+      removeEventListener(type, listener) {
+        if (listeners[type] === listener) delete listeners[type];
+      },
+    };
+  }
   createElement(tagName) { return new MockElement(tagName); }
+  addEventListener(type, listener, options) {
+    this.listeners[type] = listener;
+    this.listenerOptions[type] = options;
+  }
+  removeEventListener(type, listener) {
+    if (this.listeners[type] === listener) delete this.listeners[type];
+  }
   querySelector(selector) {
     return selector === ".center.tools" || selector === ".toolbar .center" ? this.center : null;
   }
@@ -120,12 +145,15 @@ function testCopiesExactDisplayedText() {
 function testPlacesPanelImmediatelyAfterCat() {
   let copied = "";
   let copyCount = 0;
+  let copiedAttachment = null;
   const zotero = {
     Utilities: { Internal: { copyTextToClipboard: (text) => { copied = text; copyCount += 1; } } },
+    Prefs: { get() { return undefined; } },
     debug() {},
   };
   const outline = loadPaperOutline(zotero);
   outline._toast = () => {};
+  outline.copyAttachmentFile = async (attachment) => { copiedAttachment = attachment; };
   const center = new MockElement("div");
   const cat = new MockElement("button");
   cat.id = outline.DESPACE_BTN_ID;
@@ -142,12 +170,18 @@ function testPlacesPanelImmediatelyAfterCat() {
   assert.equal(center.children[1].id, outline.READER_INFO_ID);
   assert.equal(center.children[2], builtIn);
   assert.equal(center.children[1].querySelector("#" + outline.READER_INFO_TEXT_ID).textContent, "题名 - 作者 - 2024");
+  assert.match(center.children[1].querySelector("#" + outline.READER_INFO_COPY_ID).innerHTML, /复制信息/);
+  assert.match(center.children[1].querySelector("#" + outline.READER_PDF_COPY_ID).innerHTML, /复制 PDF/);
+  assert.equal(doc.defaultView.listenerOptions.mousedown, true);
+  assert.equal(doc.defaultView.listenerOptions.click, true);
 
   outline._injectReaderInfoPanel({ doc, reader });
   assert.equal(center.children.length, 3);
-  const copy = center.children[1].querySelector("#" + outline.READER_INFO_COPY_ID);
+  const copyInfo = center.children[1].querySelector("#" + outline.READER_INFO_COPY_ID);
+  const copyPdf = center.children[1].querySelector("#" + outline.READER_PDF_COPY_ID);
   const eventCalls = { preventDefault: 0, stopPropagation: 0, stopImmediatePropagation: 0 };
-  copy.listeners.mousedown({
+  doc.defaultView.listeners.mousedown({
+    target: copyInfo,
     button: 0,
     preventDefault() { eventCalls.preventDefault += 1; },
     stopPropagation() { eventCalls.stopPropagation += 1; },
@@ -155,23 +189,33 @@ function testPlacesPanelImmediatelyAfterCat() {
   });
   assert.equal(copied, "题名 - 作者 - 2024");
   assert.equal(copyCount, 1);
-  assert.equal(copy.listenerOptions.mousedown, true);
   assert.deepEqual(eventCalls, { preventDefault: 1, stopPropagation: 1, stopImmediatePropagation: 1 });
 
-  copy.listeners.click({
+  doc.defaultView.listeners.click({
+    target: copyInfo,
     preventDefault() {},
     stopPropagation() {},
     stopImmediatePropagation() {},
   });
   assert.equal(copyCount, 1, "the following click must not copy a second time");
 
-  copy.listeners.mousedown({
+  doc.defaultView.listeners.click({
+    target: copyPdf,
+    preventDefault() {},
+    stopPropagation() {},
+    stopImmediatePropagation() {},
+  });
+  assert.equal(copiedAttachment, reader._item, "click fallback must copy the current PDF attachment");
+
+  copiedAttachment = null;
+  doc.defaultView.listeners.mousedown({
+    target: copyPdf,
     button: 2,
     preventDefault() {},
     stopPropagation() {},
     stopImmediatePropagation() {},
   });
-  assert.equal(copyCount, 1, "right click must not trigger copying");
+  assert.equal(copiedAttachment, null, "right click must not trigger PDF copying");
 }
 
 function testUsesRedrawnCatIconEverywhere() {

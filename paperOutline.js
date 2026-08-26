@@ -3032,6 +3032,7 @@ var PaperOutline = {
   READER_INFO_ID: "paper-outline-reader-info",
   READER_INFO_TEXT_ID: "paper-outline-reader-info-text",
   READER_INFO_COPY_ID: "paper-outline-reader-info-copy",
+  READER_PDF_COPY_ID: "paper-outline-reader-pdf-copy",
 
   // 读取当前 PDF 对应条目的「题名 - 作者 - 年份」，与 Zotero 标签页提示信息保持一致。
   _getReaderInfoText(reader) {
@@ -3083,12 +3084,75 @@ var PaperOutline = {
     }
   },
 
+  _stopReaderInfoEvent(event) {
+    try {
+      event.preventDefault();
+      event.stopPropagation();
+      if (typeof event.stopImmediatePropagation === "function") event.stopImmediatePropagation();
+    } catch (e) {}
+  },
+
+  _findReaderInfoActionButton(event, doc) {
+    let node = event && event.target;
+    while (node && node !== doc) {
+      try {
+        if (node.getAttribute && node.getAttribute("data-paper-outline-reader-action")) return node;
+      } catch (e) {}
+      node = node.parentNode;
+    }
+    return null;
+  },
+
+  _handleReaderInfoAction(event, doc, phase) {
+    const button = this._findReaderInfoActionButton(event, doc);
+    if (!button) return;
+    if (phase === "mousedown" && event && typeof event.button === "number" && event.button !== 0) return;
+    this._stopReaderInfoEvent(event);
+    if (button.disabled) return;
+
+    const action = button.getAttribute("data-paper-outline-reader-action");
+    const now = Date.now();
+    const state = doc.__paperOutlineReaderInfoActivation;
+    if (phase === "click" && state && state.phase === "mousedown" &&
+        state.action === action && now - state.at < 1200) {
+      return;
+    }
+    doc.__paperOutlineReaderInfoActivation = { action, phase, at: now };
+
+    const reader = button.__paperOutlineReader;
+    if (action === "copy-info") {
+      this.copyReaderInfo(reader);
+    } else if (action === "copy-pdf") {
+      this.copyAttachmentFile(reader && reader._item);
+    }
+  },
+
+  _ensureReaderInfoEventRouter(doc) {
+    if (!doc || typeof doc.addEventListener !== "function" || doc.__paperOutlineReaderInfoRouter) return;
+    const root = doc.defaultView && typeof doc.defaultView.addEventListener === "function" ? doc.defaultView : doc;
+    const onMouseDown = (event) => PaperOutline._handleReaderInfoAction(event, doc, "mousedown");
+    const onClick = (event) => PaperOutline._handleReaderInfoAction(event, doc, "click");
+    root.addEventListener("mousedown", onMouseDown, true);
+    root.addEventListener("click", onClick, true);
+    doc.__paperOutlineReaderInfoRouter = { root, onMouseDown, onClick };
+  },
+
+  _removeReaderInfoEventRouter(doc) {
+    const router = doc && doc.__paperOutlineReaderInfoRouter;
+    const root = router && router.root;
+    if (!router || !root || typeof root.removeEventListener !== "function") return;
+    try { root.removeEventListener("mousedown", router.onMouseDown, true); } catch (e) {}
+    try { root.removeEventListener("click", router.onClick, true); } catch (e) {}
+    try { delete doc.__paperOutlineReaderInfoRouter; } catch (e) {}
+    try { delete doc.__paperOutlineReaderInfoActivation; } catch (e) {}
+  },
+
   _makeReaderInfoPanel(doc, reader) {
     const panel = doc.createElement("div");
     panel.id = this.READER_INFO_ID;
     panel.style.cssText =
       "height:26px;display:flex;align-items:center;box-sizing:border-box;overflow:hidden;" +
-      "flex:0 1 310px;min-width:150px;max-width:min(310px,30vw);margin-left:4px;" +
+      "flex:0 1 430px;min-width:260px;max-width:min(430px,42vw);margin-left:4px;" +
       "border:1px solid var(--fill-quarternary,#d5d5d5);border-radius:7px;" +
       "background:var(--material-sidepane,rgba(255,255,255,.78));color:var(--fill-primary,#333);";
 
@@ -3098,38 +3162,39 @@ var PaperOutline = {
       "min-width:0;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" +
       "padding:0 8px;font-size:12px;line-height:24px;user-select:text;";
 
-    const copy = doc.createElement("button");
-    copy.id = this.READER_INFO_COPY_ID;
-    copy.setAttribute("type", "button");
-    copy.setAttribute("tabindex", "-1");
-    copy.setAttribute("aria-label", "复制当前文献信息");
-    copy.style.cssText =
-      "height:24px;flex:none;display:inline-flex;align-items:center;gap:4px;padding:0 8px;" +
-      "border:0;border-left:1px solid var(--fill-quarternary,#d5d5d5);border-radius:0 6px 6px 0;" +
-      "background:transparent;color:var(--accent-blue,#2e7dd1);font-size:11.5px;cursor:pointer;";
-    copy.innerHTML =
-      '<svg width="13" height="13" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">' +
-      '<rect x="5.2" y="4.8" width="7.3" height="8" rx="1.4" stroke="currentColor" stroke-width="1.35"/>' +
-      '<path d="M10.4 4.8V3.6c0-.8-.6-1.4-1.4-1.4H4.1c-.8 0-1.4.6-1.4 1.4v6.1c0 .8.6 1.4 1.4 1.4h1.1" stroke="currentColor" stroke-width="1.35" stroke-linecap="round"/>' +
-      '</svg><span>复制</span>';
-    copy.addEventListener("mouseenter", () => { if (!copy.disabled) copy.style.background = "rgba(46,125,209,.10)"; });
-    copy.addEventListener("mouseleave", () => { copy.style.background = "transparent"; });
-    const stopCopyEvent = (event) => {
-      try {
-        event.preventDefault();
-        event.stopPropagation();
-        if (typeof event.stopImmediatePropagation === "function") event.stopImmediatePropagation();
-      } catch (e) {}
+    const makeActionButton = (id, action, label, ariaLabel, isLast) => {
+      const button = doc.createElement("button");
+      button.id = id;
+      button.setAttribute("type", "button");
+      button.setAttribute("tabindex", "-1");
+      button.setAttribute("aria-label", ariaLabel);
+      button.setAttribute("data-paper-outline-reader-action", action);
+      button.style.cssText =
+        "height:24px;flex:none;display:inline-flex;align-items:center;gap:4px;padding:0 8px;" +
+        "border:0;border-left:1px solid var(--fill-quarternary,#d5d5d5);" +
+        "border-radius:" + (isLast ? "0 6px 6px 0" : "0") + ";" +
+        "background:transparent;color:var(--accent-blue,#2e7dd1);font-size:11.5px;cursor:pointer;";
+      button.innerHTML =
+        '<svg width="13" height="13" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">' +
+        (action === "copy-pdf"
+          ? '<path d="M3.2 2.2h6l3.6 3.6v7.6c0 .7-.6 1.2-1.2 1.2H3.2c-.7 0-1.2-.6-1.2-1.2v-10c0-.7.6-1.2 1.2-1.2Z" stroke="currentColor" stroke-width="1.25"/><path d="M9.2 2.4v3.4h3.4M4.1 11.9V8.1h1.4c.8 0 1.3.4 1.3 1.1s-.5 1.1-1.3 1.1H4.2M8 11.9V8.1h1c1.2 0 2 .7 2 1.9s-.8 1.9-2 1.9H8Z" stroke="currentColor" stroke-width=".9" stroke-linecap="round" stroke-linejoin="round"/>'
+          : '<rect x="5.2" y="4.8" width="7.3" height="8" rx="1.4" stroke="currentColor" stroke-width="1.35"/><path d="M10.4 4.8V3.6c0-.8-.6-1.4-1.4-1.4H4.1c-.8 0-1.4.6-1.4 1.4v6.1c0 .8.6 1.4 1.4 1.4h1.1" stroke="currentColor" stroke-width="1.35" stroke-linecap="round"/>') +
+        "</svg><span>" + label + "</span>";
+      button.addEventListener("mouseenter", () => { if (!button.disabled) button.style.background = "rgba(46,125,209,.10)"; });
+      button.addEventListener("mouseleave", () => { button.style.background = "transparent"; });
+      return button;
     };
-    copy.addEventListener("mousedown", (event) => {
-      if (event && typeof event.button === "number" && event.button !== 0) return;
-      stopCopyEvent(event);
-      if (!copy.disabled) PaperOutline.copyReaderInfo(reader);
-    }, true);
-    copy.addEventListener("click", stopCopyEvent, true);
+
+    const copyInfo = makeActionButton(
+      this.READER_INFO_COPY_ID, "copy-info", "复制信息", "复制题名、作者和年份", false
+    );
+    const copyPdf = makeActionButton(
+      this.READER_PDF_COPY_ID, "copy-pdf", "复制 PDF", "复制当前 PDF 文件", true
+    );
 
     panel.appendChild(text);
-    panel.appendChild(copy);
+    panel.appendChild(copyInfo);
+    panel.appendChild(copyPdf);
     this._updateReaderInfoPanel(panel, reader);
     return panel;
   },
@@ -3139,17 +3204,27 @@ var PaperOutline = {
     const text = this._getReaderInfoText(reader);
     const shown = text || "当前 PDF 无可复制的题录信息";
     const label = panel.querySelector && panel.querySelector("#" + this.READER_INFO_TEXT_ID);
-    const copy = panel.querySelector && panel.querySelector("#" + this.READER_INFO_COPY_ID);
+    const copyInfo = panel.querySelector && panel.querySelector("#" + this.READER_INFO_COPY_ID);
+    const copyPdf = panel.querySelector && panel.querySelector("#" + this.READER_PDF_COPY_ID);
     if (label) {
       label.textContent = shown;
       label.setAttribute("title", shown);
     }
     panel.setAttribute("title", shown);
-    if (copy) {
-      copy.disabled = !text;
-      copy.style.opacity = text ? "1" : ".45";
-      copy.style.cursor = text ? "pointer" : "default";
-      copy.setAttribute("title", text ? "复制：" + text : "当前 PDF 无可复制的题录信息");
+    if (copyInfo) {
+      copyInfo.__paperOutlineReader = reader;
+      copyInfo.disabled = !text;
+      copyInfo.style.opacity = text ? "1" : ".45";
+      copyInfo.style.cursor = text ? "pointer" : "default";
+      copyInfo.setAttribute("title", text ? "复制信息：" + text : "当前 PDF 无可复制的题录信息");
+    }
+    if (copyPdf) {
+      const canCopyPdf = !!(reader && reader._item) && this.pref("copyFile", true);
+      copyPdf.__paperOutlineReader = reader;
+      copyPdf.disabled = !canCopyPdf;
+      copyPdf.style.opacity = canCopyPdf ? "1" : ".45";
+      copyPdf.style.cursor = canCopyPdf ? "pointer" : "default";
+      copyPdf.setAttribute("title", canCopyPdf ? "复制当前 PDF 文件" : "当前 PDF 文件不可复制");
     }
   },
 
@@ -3157,6 +3232,7 @@ var PaperOutline = {
     const doc = event && event.doc;
     const reader = event && event.reader;
     if (!doc) return;
+    this._ensureReaderInfoEventRouter(doc);
     let panel = doc.getElementById(this.READER_INFO_ID);
     if (!panel) panel = this._makeReaderInfoPanel(doc, reader);
     else this._updateReaderInfoPanel(panel, reader);
@@ -3426,6 +3502,7 @@ var PaperOutline = {
           if (bar) bar.remove();
           const info = d.getElementById(this.READER_INFO_ID);
           if (info) info.remove();
+          this._removeReaderInfoEventRouter(d);
         } catch (e) {}
       });
     } catch (e) {}
