@@ -3114,10 +3114,19 @@ var PaperOutline = {
       '</svg><span>复制</span>';
     copy.addEventListener("mouseenter", () => { if (!copy.disabled) copy.style.background = "rgba(46,125,209,.10)"; });
     copy.addEventListener("mouseleave", () => { copy.style.background = "transparent"; });
-    copy.addEventListener("click", (event) => {
-      try { event.preventDefault(); event.stopPropagation(); } catch (e) {}
-      PaperOutline.copyReaderInfo(reader);
-    });
+    const stopCopyEvent = (event) => {
+      try {
+        event.preventDefault();
+        event.stopPropagation();
+        if (typeof event.stopImmediatePropagation === "function") event.stopImmediatePropagation();
+      } catch (e) {}
+    };
+    copy.addEventListener("mousedown", (event) => {
+      if (event && typeof event.button === "number" && event.button !== 0) return;
+      stopCopyEvent(event);
+      if (!copy.disabled) PaperOutline.copyReaderInfo(reader);
+    }, true);
+    copy.addEventListener("click", stopCopyEvent, true);
 
     panel.appendChild(text);
     panel.appendChild(copy);

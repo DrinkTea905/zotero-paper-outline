@@ -33,7 +33,11 @@ class MockElement {
   }
 
   setAttribute(name, value) { this.attributes[name] = String(value); }
-  addEventListener(type, listener) { this.listeners[type] = listener; }
+  addEventListener(type, listener, options) {
+    this.listeners[type] = listener;
+    this.listenerOptions = this.listenerOptions || {};
+    this.listenerOptions[type] = options;
+  }
   appendChild(child) { return this.insertBefore(child, null); }
   insertBefore(child, before) {
     if (child.parentNode) {
@@ -115,8 +119,9 @@ function testCopiesExactDisplayedText() {
 
 function testPlacesPanelImmediatelyAfterCat() {
   let copied = "";
+  let copyCount = 0;
   const zotero = {
-    Utilities: { Internal: { copyTextToClipboard: (text) => { copied = text; } } },
+    Utilities: { Internal: { copyTextToClipboard: (text) => { copied = text; copyCount += 1; } } },
     debug() {},
   };
   const outline = loadPaperOutline(zotero);
@@ -141,8 +146,32 @@ function testPlacesPanelImmediatelyAfterCat() {
   outline._injectReaderInfoPanel({ doc, reader });
   assert.equal(center.children.length, 3);
   const copy = center.children[1].querySelector("#" + outline.READER_INFO_COPY_ID);
-  copy.listeners.click({ preventDefault() {}, stopPropagation() {} });
+  const eventCalls = { preventDefault: 0, stopPropagation: 0, stopImmediatePropagation: 0 };
+  copy.listeners.mousedown({
+    button: 0,
+    preventDefault() { eventCalls.preventDefault += 1; },
+    stopPropagation() { eventCalls.stopPropagation += 1; },
+    stopImmediatePropagation() { eventCalls.stopImmediatePropagation += 1; },
+  });
   assert.equal(copied, "题名 - 作者 - 2024");
+  assert.equal(copyCount, 1);
+  assert.equal(copy.listenerOptions.mousedown, true);
+  assert.deepEqual(eventCalls, { preventDefault: 1, stopPropagation: 1, stopImmediatePropagation: 1 });
+
+  copy.listeners.click({
+    preventDefault() {},
+    stopPropagation() {},
+    stopImmediatePropagation() {},
+  });
+  assert.equal(copyCount, 1, "the following click must not copy a second time");
+
+  copy.listeners.mousedown({
+    button: 2,
+    preventDefault() {},
+    stopPropagation() {},
+    stopImmediatePropagation() {},
+  });
+  assert.equal(copyCount, 1, "right click must not trigger copying");
 }
 
 function testUsesRedrawnCatIconEverywhere() {
