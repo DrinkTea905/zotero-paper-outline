@@ -30,6 +30,7 @@
           <menupopup>
             <menuitem value="deepseek" label="DeepSeek（默认）"/>
             <menuitem value="openai" label="OpenAI"/>
+            <menuitem value="mimo" label="Xiaomi MiMo"/>
             <menuitem value="moonshot" label="月之暗面 Kimi"/>
             <menuitem value="zhipu" label="智谱 GLM"/>
             <menuitem value="qwen" label="通义千问 Qwen"/>
@@ -329,6 +330,18 @@
           </html:div>
 
           <html:div class="paper-outline-toggle-list" style="margin-top:16px;">
+            <html:div class="paper-outline-toggle-item">
+              <html:input id="paper-outline-deep-thinking"
+                          class="paper-outline-toggle-control"
+                          type="checkbox"
+                          aria-labelledby="paper-outline-deep-thinking-title"/>
+              <html:div class="paper-outline-toggle-copy">
+                <html:label for="paper-outline-deep-thinking"
+                            id="paper-outline-deep-thinking-title"
+                            class="paper-outline-toggle-title">启用深度思考</html:label>
+                <html:p class="paper-outline-toggle-desc">默认关闭；仅对声明支持该参数的内置服务商生效。</html:p>
+              </html:div>
+            </html:div>
             <html:div class="paper-outline-toggle-item">
               <html:input id="paper-outline-save-as-note"
                           class="paper-outline-toggle-control"

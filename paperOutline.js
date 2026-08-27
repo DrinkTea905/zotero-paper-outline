@@ -93,8 +93,10 @@ var PaperOutline = {
     "5. 使用分级标题+要点的结构化排版，逻辑清晰，重点信息加粗标注；\n" +
     "6. 抓主干、不遗漏核心结论；宁可凝练也不要超过 1000 字。",
 
-  // 总结喂给 AI 的全文字符上限（详细全文总结，需尽量覆盖全文；超长才首尾截断）
-  SUMMARY_MAX_CHARS: 60000,
+  // 未知模型继续使用旧版 60,000 字符的保守上限；已知模型按上下文窗口动态计算。
+  SUMMARY_FALLBACK_MAX_CHARS: 60000,
+  SUMMARY_OUTPUT_RESERVE_TOKENS: 4096,
+  CONTEXT_SAFETY_RATIO: 0.95,
 
   // 子笔记里的整篇总结标记（用于去重判断：同一文献已有总结笔记则自动模式跳过）
   SUMMARY_MARKER: "由 Paper Outline 生成 · 整篇总结",
@@ -1061,7 +1063,7 @@ var PaperOutline = {
         chunks.length > 1
           ? `这是论文的第 ${idx + 1}/${chunks.length} 部分，请只就这部分输出目录条目：\n\n${chunk}`
           : `论文全文：\n\n${chunk}`;
-      const raw = await this.callAI(sys, userMsg);
+      const raw = await this.callAI(sys, userMsg, { task: "outline" });
       return this._parseOutline(raw);
     });
 
@@ -1484,8 +1486,9 @@ var PaperOutline = {
   // ── AI 服务商预设（全部走 OpenAI 兼容 /chat/completions；Ollama 用其 /v1 兼容端点）──
   // 选定服务商即用其默认 URL/模型；用户在设置里填的 apiUrl/model 非空则覆盖（自定义服务商必填）。
   PROVIDERS: {
-    deepseek:    { label: "DeepSeek（默认）",          url: "https://api.deepseek.com/chat/completions",                          model: "deepseek-v4-flash",       json: true },
+    deepseek:    { label: "DeepSeek（默认）",          url: "https://api.deepseek.com/chat/completions",                          model: "deepseek-v4-flash",       json: true,  supportsThinking: true },
     openai:      { label: "OpenAI",                     url: "https://api.openai.com/v1/chat/completions",                         model: "gpt-4o-mini",             json: true },
+    mimo:        { label: "Xiaomi MiMo",                url: "https://api.xiaomimimo.com/v1/chat/completions",                    model: "mimo-v2.5",               json: true,  supportsThinking: true, contextTokens: 1048576, completionTokensParam: "max_completion_tokens" },
     moonshot:    { label: "月之暗面 Kimi",              url: "https://api.moonshot.cn/v1/chat/completions",                        model: "moonshot-v1-8k",          json: true },
     zhipu:       { label: "智谱 GLM",                   url: "https://open.bigmodel.cn/api/paas/v4/chat/completions",              model: "glm-4-flash",             json: true },
     qwen:        { label: "通义千问 Qwen",              url: "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions", model: "qwen-plus",               json: true },
@@ -1497,6 +1500,7 @@ var PaperOutline = {
   MODEL_PREFERENCES: {
     deepseek:    [/flash/i, /chat/i, /deepseek/i, /pro/i],
     openai:      [/^gpt-4o-mini$/i, /^gpt-4\.1-mini$/i, /^gpt-4o$/i, /^gpt-4\.1$/i, /^gpt-/i],
+    mimo:        [/^mimo-v2\.5$/i, /^mimo-v2\.5-pro$/i],
     moonshot:    [/moonshot.*8k/i, /moonshot/i, /kimi/i],
     zhipu:       [/glm-4-flash/i, /glm-4/i, /glm/i],
     qwen:        [/qwen-plus/i, /qwen.*turbo/i, /qwen/i],
@@ -1504,6 +1508,13 @@ var PaperOutline = {
     ollama:      [/qwen/i, /llama/i, /mistral/i],
     custom:      [],
   },
+
+  // /models 只返回模型 ID，不返回上下文窗口；这里仅维护确认过的模型元数据。
+  MODEL_CONTEXT_WINDOWS: [
+    { pattern: /^mimo-v2\.5(?:-pro)?$/i, tokens: 1048576 },
+    { pattern: /^gpt-4o(?:-mini)?(?:-|$)/i, tokens: 128000 },
+    { pattern: /^moonshot-v1-8k$/i, tokens: 8192 },
+  ],
 
   _resolveAI(overrides) {
     overrides = overrides || {};
@@ -1523,7 +1534,59 @@ var PaperOutline = {
       model,
       key,
       json: preset.json,
+      supportsThinking: !!preset.supportsThinking,
+      contextTokens: preset.contextTokens || 0,
+      completionTokensParam: preset.completionTokensParam || "max_tokens",
+      defaultModel: preset.model,
       modelIsCustom: !!(customModel || "").trim(),
+    };
+  },
+
+  _contextWindowTokens(config) {
+    const model = String((config && config.model) || "").trim();
+    for (const meta of this.MODEL_CONTEXT_WINDOWS) {
+      if (meta.pattern.test(model)) return meta.tokens;
+    }
+    if (
+      config &&
+      !config.modelIsCustom &&
+      model &&
+      model === config.defaultModel &&
+      config.contextTokens
+    ) {
+      return config.contextTokens;
+    }
+    return 0;
+  },
+
+  // 不引入 tokenizer 依赖，按「1 个字符至少占 1 token」保守估算，对中文和混合文本更安全。
+  _estimatePromptTokens(text) {
+    return String(text || "").length;
+  },
+
+  _summaryInputLimit(config, systemPrompt, fixedUserText) {
+    const contextTokens = this._contextWindowTokens(config);
+    if (!contextTokens) return this.SUMMARY_FALLBACK_MAX_CHARS;
+
+    const safeWindow = Math.floor(contextTokens * this.CONTEXT_SAFETY_RATIO);
+    const outputReserve = Math.min(
+      this.SUMMARY_OUTPUT_RESERVE_TOKENS,
+      Math.max(1024, Math.floor(contextTokens * 0.05))
+    );
+    const promptReserve = this._estimatePromptTokens(systemPrompt) +
+      this._estimatePromptTokens(fixedUserText) + 256;
+    const available = safeWindow - outputReserve - promptReserve;
+    if (available <= 0) {
+      throw new Error("总结提示词过长，已超出当前模型可用上下文；请缩短总结提示词或更换长上下文模型。");
+    }
+    return available;
+  },
+
+  _applyThinkingPreference(payload, config, task) {
+    if (!payload || !config || !config.supportsThinking) return;
+    if (task !== "summary" && task !== "outline") return;
+    payload.thinking = {
+      type: this.pref("deepThinking", false) === true ? "enabled" : "disabled",
     };
   },
 
@@ -1544,7 +1607,7 @@ var PaperOutline = {
     if (fallback && models.includes(fallback)) return fallback;
 
     const usable = models.filter((id) =>
-      !/(embedding|rerank|whisper|speech|tts|moderation|image|dall-e)/i.test(id)
+      !/(embedding|rerank|whisper|speech|tts|asr|voiceclone|voicedesign|moderation|image|dall-e)/i.test(id)
     );
     const candidates = usable.length ? usable : models;
     const preferences = this.MODEL_PREFERENCES[provider] || [];
@@ -1900,10 +1963,10 @@ var PaperOutline = {
       stream: false,
       messages: [{ role: "user", content: "Reply only with OK." }],
       temperature: 0,
-      max_tokens: 32,
     };
-    // DeepSeek V4 默认开启思考模式；短测试若不关闭，输出额度可能全被 reasoning_content 占用。
-    if (config.provider === "deepseek") {
+    payload[config.completionTokensParam || "max_tokens"] = 32;
+    // 连接测试只校验可用性，对已声明支持的服务商固定关闭思考，避免短输出被推理占满。
+    if (config.supportsThinking) {
       payload.thinking = { type: "disabled" };
     }
     const result = await this._post(
@@ -1929,7 +1992,7 @@ var PaperOutline = {
   // opts.json：是否要求 JSON 输出（目录=true；整篇总结=false，要纯文本）。不传则按服务商预设。
   async callAI(systemPrompt, userPrompt, opts) {
     opts = opts || {};
-    let config = await this._prepareAI();
+    let config = opts.config || (await this._prepareAI());
     let { url, model, key, json } = config;
     if (!url) throw new Error("未配置 API URL（自定义服务商需在设置里填写）");
     const headers = {};
@@ -1945,6 +2008,7 @@ var PaperOutline = {
     };
     const useJson = opts.json !== undefined ? opts.json : json;
     if (useJson) payload.response_format = { type: "json_object" }; // 多数服务商支持；不支持的预设里关掉
+    this._applyThinkingPreference(payload, config, opts.task);
     let j;
     try {
       j = await this._post(url, headers, payload);
@@ -2650,13 +2714,25 @@ var PaperOutline = {
     return bundle.text || "";
   },
 
-  // 总结只需代表性内容：超长则取首段(70%)+尾段(30%)，覆盖引言与结论
+  // 总结只喂有效长度；真正超限时等距抽取全文，避免方法、结果等中段全部丢失。
   _textForSummary(fullText, maxChars) {
     const t = String(fullText || "");
-    if (t.length <= maxChars) return t;
-    const head = Math.floor(maxChars * 0.7);
-    const tail = maxChars - head;
-    return t.slice(0, head) + "\n\n……（中略）……\n\n" + t.slice(t.length - tail);
+    const limit = Math.max(1, Math.floor(maxChars || this.SUMMARY_FALLBACK_MAX_CHARS));
+    if (t.length <= limit) return t;
+
+    const segmentCount = 5;
+    const marker = "\n\n……（超出当前模型上下文，已等距省略部分原文）……\n\n";
+    const contentBudget = Math.max(segmentCount, limit - marker.length * (segmentCount - 1));
+    const segmentLength = Math.max(1, Math.floor(contentBudget / segmentCount));
+    const lastStart = Math.max(0, t.length - segmentLength);
+    const parts = [];
+    for (let i = 0; i < segmentCount; i++) {
+      const start = i === segmentCount - 1
+        ? lastStart
+        : Math.floor((lastStart * i) / (segmentCount - 1));
+      parts.push(t.slice(start, start + segmentLength));
+    }
+    return parts.join(marker).slice(0, limit);
   },
 
   // 生成整篇总结文本（opts.fullText 已有则复用，避免重复抽取；opts.att 指定 PDF）
@@ -2673,10 +2749,17 @@ var PaperOutline = {
       });
     }
     if (!full || !full.trim()) throw new Error("没有识别出可用的论文文字。");
-    const text = this._textForSummary(full, this.SUMMARY_MAX_CHARS);
     const sys = this.pref("summaryPrompt", this.SUMMARY_PROMPT);
+    const titlePrefix = "论文标题：" + (item.getField("title") || "") + "\n\n论文全文：\n\n";
+    const config = await this._prepareAI();
+    const maxChars = this._summaryInputLimit(config, sys, titlePrefix);
+    const text = this._textForSummary(full, maxChars);
     if (onText) onText("AI 总结中…");
-    const out = await this.callAI(sys, "论文标题：" + (item.getField("title") || "") + "\n\n论文全文：\n\n" + text, { json: false });
+    const out = await this.callAI(sys, titlePrefix + text, {
+      json: false,
+      task: "summary",
+      config,
+    });
     const summary = String(out || "").trim();
     if (!summary) throw new Error("AI 未返回总结内容");
     return summary;

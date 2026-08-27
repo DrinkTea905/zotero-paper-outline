@@ -4,6 +4,7 @@
   const PROVIDERS = {
     deepseek: { label: "DeepSeek", model: "deepseek-v4-flash" },
     openai: { label: "OpenAI", model: "gpt-4o-mini" },
+    mimo: { label: "Xiaomi MiMo", model: "mimo-v2.5" },
     moonshot: { label: "月之暗面 Kimi", model: "moonshot-v1-8k" },
     zhipu: { label: "智谱 GLM", model: "glm-4-flash" },
     qwen: { label: "通义千问 Qwen", model: "qwen-plus" },
@@ -23,6 +24,7 @@
     "paper-outline-despace-button": { key: "despaceButton", fallback: true },
     "paper-outline-copy-file": { key: "copyFile", fallback: true },
     "paper-outline-save-as-note": { key: "saveAsNote", fallback: false },
+    "paper-outline-deep-thinking": { key: "deepThinking", fallback: false },
   };
 
   function byId(id) {

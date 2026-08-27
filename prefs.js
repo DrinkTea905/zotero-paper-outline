@@ -19,6 +19,8 @@ pref("extensions.paperoutline.mineruExpiryReminderAt", "0");
 // —— 通用 ——
 pref("extensions.paperoutline.concurrency", 5);
 pref("extensions.paperoutline.maxCharsPerChunk", 40000);
+// 对声明支持 thinking 参数的内置服务商生效，默认关闭。
+pref("extensions.paperoutline.deepThinking", false);
 // 识别目录层级深度：0=全部（默认识别到所有层级），1/2/3/4=只到该级
 pref("extensions.paperoutline.maxLevel", 0);
 // 生成后另存为子笔记：默认关（目录始终缓存在阅读器面板，无需靠笔记保存）

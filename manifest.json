@@ -1,8 +1,8 @@
 {
   "manifest_version": 2,
   "name": "Paper Outline",
-  "version": "1.7.7",
-  "description": "用 AI 为论文自动生成整篇总结（存笔记）与带页码的层级目录、逐节摘要（显示在阅读器大纲栏、点击跳转）。扫描 PDF 可通过 MinerU 识别文字后继续处理，并提供 Token 到期提醒与上传选择。支持在设置页和阅读器内测试 API 连接，文献入库可自动生成，也可右键手动。兼容 DeepSeek/OpenAI/Kimi/智谱/通义/SiliconFlow/Ollama 等服务商。另附「去除文字空格」「复制文献信息」与「复制 PDF 文件」等实用工具。",
+  "version": "1.7.8",
+  "description": "用 AI 为论文自动生成整篇总结（存笔记）与带页码的层级目录、逐节摘要（显示在阅读器大纲栏、点击跳转）。扫描 PDF 可通过 MinerU 识别文字后继续处理，并提供 Token 到期提醒与上传选择。支持在设置页和阅读器内测试 API 连接，文献入库可自动生成，也可右键手动。兼容 DeepSeek/OpenAI/Xiaomi MiMo/Kimi/智谱/通义/SiliconFlow/Ollama 等服务商。另附「去除文字空格」「复制文献信息」与「复制 PDF 文件」等实用工具。",
   "homepage_url": "https://github.com/DrinkTea905/zotero-paper-outline",
   "icons": {
     "48": "icons/icon.png",
