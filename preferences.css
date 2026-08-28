@@ -281,6 +281,10 @@
   column-gap: 11px;
 }
 
+.paper-outline-inline-toggle {
+  padding: 2px 0;
+}
+
 .paper-outline-toggle-control {
   appearance: none;
   box-sizing: border-box;

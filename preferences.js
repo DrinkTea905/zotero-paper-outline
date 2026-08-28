@@ -27,6 +27,13 @@
     "paper-outline-deep-thinking": { key: "deepThinking", fallback: false },
   };
 
+  const PROVIDER_CONFIG_FIELDS = {
+    apiUrl: "paper-outline-api-url",
+    apiKey: "paper-outline-api-key",
+    model: "paper-outline-model",
+  };
+  const PROVIDER_CONFIG_PREFIX = "extensions.paperoutline.providerConfig.";
+
   function byId(id) {
     return document.getElementById(id);
   }
@@ -43,27 +50,134 @@
     _testing: false,
     _mineruTesting: false,
     _mineruTokenSnapshot: "",
+    _activeProvider: null,
+    _restoringProvider: false,
 
     init() {
       if (this._ready) return;
       this._ready = true;
+      const providerElement = byId("paper-outline-provider");
+      this._activeProvider = this.normalizeProvider(
+        Zotero.Prefs.get("extensions.paperoutline.provider", true) ||
+          (providerElement && providerElement.value) ||
+          "deepseek"
+      );
+      if (providerElement) providerElement.value = this._activeProvider;
+      this.ensureProviderConfigMigration(this._activeProvider);
+      this.restoreProviderConfig(this._activeProvider);
       this.bindTogglePreferences();
-      this.updateProvider(false);
+      this.updateProvider();
       this.bindMineruPreferences();
 
-      [
-        "paper-outline-provider",
-        "paper-outline-api-key",
-        "paper-outline-model",
-        "paper-outline-api-url",
-      ].forEach((id) => {
+      ["paper-outline-provider"].forEach((id) => {
         const element = byId(id);
         if (!element) return;
-        element.addEventListener(id === "paper-outline-provider" ? "command" : "input", () => {
-          if (id === "paper-outline-provider") this.updateProvider(true);
+        element.addEventListener("command", () => {
+          this.switchProvider(element.value);
           this.markConnectionDirty();
         });
       });
+      Object.values(PROVIDER_CONFIG_FIELDS).forEach((id) => {
+        const element = byId(id);
+        if (!element) return;
+        element.addEventListener("input", () => {
+          this.saveActiveProviderConfig();
+          this.markConnectionDirty();
+        });
+        element.addEventListener("change", () => this.saveActiveProviderConfig());
+      });
+    },
+
+    normalizeProvider(provider) {
+      return Object.prototype.hasOwnProperty.call(PROVIDERS, provider) ? provider : "deepseek";
+    },
+
+    providerConfigPref(provider, key) {
+      return PROVIDER_CONFIG_PREFIX + this.normalizeProvider(provider) + "." + key;
+    },
+
+    ensureProviderConfigMigration(provider) {
+      if (Zotero.Prefs.get("extensions.paperoutline.providerConfigsMigrated", true) === true) {
+        return;
+      }
+      const selected = this.normalizeProvider(provider);
+      Object.keys(PROVIDER_CONFIG_FIELDS).forEach((key) => {
+        const scopedName = this.providerConfigPref(selected, key);
+        const existing = Zotero.Prefs.get(scopedName, true);
+        if (existing === undefined || existing === null) {
+          const legacy = Zotero.Prefs.get("extensions.paperoutline." + key, true);
+          Zotero.Prefs.set(scopedName, String(legacy || ""), true);
+        }
+      });
+      Zotero.Prefs.set("extensions.paperoutline.providerConfigsMigrated", true, true);
+    },
+
+    readProviderConfig(provider) {
+      const selected = this.normalizeProvider(provider);
+      const api = Zotero && Zotero.PaperOutlineGPT;
+      if (api && typeof api.getProviderConfig === "function") {
+        return api.getProviderConfig(selected);
+      }
+      const config = {};
+      Object.keys(PROVIDER_CONFIG_FIELDS).forEach((key) => {
+        const value = Zotero.Prefs.get(this.providerConfigPref(selected, key), true);
+        config[key] = value === undefined || value === null ? "" : String(value);
+      });
+      return config;
+    },
+
+    writeProviderConfig(provider, config, activate) {
+      const selected = this.normalizeProvider(provider);
+      const api = Zotero && Zotero.PaperOutlineGPT;
+      if (api && typeof api.saveProviderConfig === "function") {
+        api.saveProviderConfig(selected, config, !!activate);
+        return;
+      }
+      Object.keys(PROVIDER_CONFIG_FIELDS).forEach((key) => {
+        const value = String((config && config[key]) || "");
+        Zotero.Prefs.set(this.providerConfigPref(selected, key), value, true);
+        if (activate) Zotero.Prefs.set("extensions.paperoutline." + key, value, true);
+      });
+      if (activate) Zotero.Prefs.set("extensions.paperoutline.provider", selected, true);
+    },
+
+    currentProviderConfig() {
+      const config = {};
+      Object.keys(PROVIDER_CONFIG_FIELDS).forEach((key) => {
+        const element = byId(PROVIDER_CONFIG_FIELDS[key]);
+        config[key] = String((element && element.value) || "");
+      });
+      return config;
+    },
+
+    saveActiveProviderConfig() {
+      if (this._restoringProvider || !this._activeProvider) return;
+      this.writeProviderConfig(this._activeProvider, this.currentProviderConfig(), true);
+    },
+
+    restoreProviderConfig(provider) {
+      const selected = this.normalizeProvider(provider);
+      const config = this.readProviderConfig(selected);
+      this._restoringProvider = true;
+      try {
+        Object.keys(PROVIDER_CONFIG_FIELDS).forEach((key) => {
+          const element = byId(PROVIDER_CONFIG_FIELDS[key]);
+          if (element) element.value = String(config[key] || "");
+        });
+        this.writeProviderConfig(selected, config, true);
+      } finally {
+        this._restoringProvider = false;
+      }
+    },
+
+    switchProvider(provider) {
+      const next = this.normalizeProvider(provider);
+      if (this._activeProvider && this._activeProvider !== next) {
+        this.saveActiveProviderConfig();
+      }
+      this._activeProvider = next;
+      this.restoreProviderConfig(next);
+      this.updateProvider();
     },
 
     bindTogglePreferences() {
@@ -258,7 +372,7 @@
       }
     },
 
-    updateProvider(resetKnownDefault) {
+    updateProvider() {
       const providerElement = byId("paper-outline-provider");
       const modelElement = byId("paper-outline-model");
       const modelHint = byId("paper-outline-model-hint");
@@ -268,19 +382,6 @@
 
       const provider = providerElement.value || "deepseek";
       const preset = PROVIDERS[provider] || PROVIDERS.deepseek;
-      const knownDefaults = Object.keys(PROVIDERS)
-        .map((key) => PROVIDERS[key].model)
-        .filter(Boolean);
-
-      if (
-        resetKnownDefault &&
-        modelElement.value &&
-        knownDefaults.includes(modelElement.value) &&
-        modelElement.value !== preset.model
-      ) {
-        modelElement.value = "";
-        emitPreferenceChange(modelElement);
-      }
 
       if (modelHint) {
         modelHint.textContent = preset.model
@@ -292,8 +393,8 @@
           provider === "ollama"
             ? "本地 Ollama 无需 API Key。"
             : provider === "custom"
-              ? "如自定义接口需要鉴权，请填写 API Key。"
-              : "仅保存在本机 Zotero 设置中。";
+              ? "当前自定义服务配置会单独保存；如需鉴权，请填写 API Key。"
+              : "按服务商分别保存在本机 Zotero 设置中。";
       }
       if (apiDetails && provider === "custom") apiDetails.open = true;
     },
@@ -320,6 +421,8 @@
       const modelElement = byId("paper-outline-model");
       const urlElement = byId("paper-outline-api-url");
       const api = Zotero && Zotero.PaperOutlineGPT;
+
+      this.saveActiveProviderConfig();
 
       if (!api || typeof api.testConnection !== "function") {
         this.setStatus("error", "插件尚未完成加载，请重启 Zotero 后再试。");

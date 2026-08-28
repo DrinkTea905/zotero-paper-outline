@@ -41,7 +41,10 @@ var PaperOutline = {
 
     // DeepSeek 于 2026-07-24 停止支持旧模型名 deepseek-chat。
     // 仅迁移官方 DeepSeek 端点；自定义中转可能仍把该名称作为别名，必须保留用户配置。
-    const provider = get("provider") || "deepseek";
+    const requestedProvider = get("provider") || "deepseek";
+    const provider = Object.prototype.hasOwnProperty.call(this.PROVIDERS, requestedProvider)
+      ? requestedProvider
+      : "deepseek";
     const model = String(get("model") || "").trim();
     const apiUrl = String(get("apiUrl") || "").trim().replace(/\/+$/, "");
     const officialDeepSeek =
@@ -50,6 +53,13 @@ var PaperOutline = {
       apiUrl === "https://api.deepseek.com/v1/chat/completions";
     if (provider === "deepseek" && model === "deepseek-chat" && officialDeepSeek) {
       set("model", "");
+    }
+
+    // v1.7.9：把旧版「当前全局」AI 配置迁移到当前服务商名下。
+    // 其他服务商保持空配置，切换时不再误用当前服务商的 Key/URL/模型。
+    if (!get("providerConfigsMigrated")) {
+      this.saveProviderConfig(provider, this.getProviderConfig(provider), true);
+      set("providerConfigsMigrated", true);
     }
 
     // 旧版本没有保存 Token 录入时间；升级后从首次读取时开始估算 90 天有效期。
@@ -304,6 +314,50 @@ var PaperOutline = {
     } catch (e) {
       this.log("registerReaderOutline error: " + e);
     }
+  },
+
+  PROVIDER_CONFIG_KEYS: ["apiUrl", "apiKey", "model"],
+
+  _providerConfigPref(provider, key) {
+    const safeProvider = String(provider || "deepseek").replace(/[^a-z0-9_-]/gi, "");
+    return "extensions.paperoutline.providerConfig." + safeProvider + "." + key;
+  },
+
+  getProviderConfig(provider) {
+    const requested = provider || this.pref("provider", "deepseek");
+    const selected = Object.prototype.hasOwnProperty.call(this.PROVIDERS, requested)
+      ? requested
+      : "deepseek";
+    const migrated = this.pref("providerConfigsMigrated", false) === true;
+    const config = {};
+    for (const key of this.PROVIDER_CONFIG_KEYS) {
+      const scoped = Zotero.Prefs.get(this._providerConfigPref(selected, key), true);
+      config[key] =
+        scoped !== undefined && scoped !== null
+          ? String(scoped)
+          : migrated
+            ? ""
+            : String(Zotero.Prefs.get("extensions.paperoutline." + key, true) || "");
+    }
+    return config;
+  },
+
+  saveProviderConfig(provider, config, activate) {
+    const requested = provider || "deepseek";
+    const selected = Object.prototype.hasOwnProperty.call(this.PROVIDERS, requested)
+      ? requested
+      : "deepseek";
+    config = config || {};
+    for (const key of this.PROVIDER_CONFIG_KEYS) {
+      const value = Object.prototype.hasOwnProperty.call(config, key)
+        ? String(config[key] || "")
+        : "";
+      Zotero.Prefs.set(this._providerConfigPref(selected, key), value, true);
+      if (activate) {
+        Zotero.Prefs.set("extensions.paperoutline." + key, value, true);
+      }
+    }
+    if (activate) Zotero.Prefs.set("extensions.paperoutline.provider", selected, true);
   },
 
   _getReaderReviveTargets(event) {
@@ -631,7 +685,7 @@ var PaperOutline = {
       const status = mk(
         "div",
         null,
-        this._needKey() && !this.pref("apiKey", "")
+        !this._hasRequiredAIKey()
           ? "尚未填写 API Key，可先测试连接查看具体提示。"
           : "生成前可先测试当前 AI 连接。",
         "po-connection-status po-status-idle"
@@ -968,7 +1022,7 @@ var PaperOutline = {
     }
 
     // 检查 API Key（本地 Ollama / 自定义 不强制）
-    if (this._needKey() && !this.pref("apiKey", "")) {
+    if (!this._hasRequiredAIKey()) {
       if (win) win.alert("尚未填写 API Key。请到 设置 → Paper Outline 里填写。");
       return;
     }
@@ -1519,11 +1573,15 @@ var PaperOutline = {
   _resolveAI(overrides) {
     overrides = overrides || {};
     const has = (key) => Object.prototype.hasOwnProperty.call(overrides, key);
-    const p = has("provider") ? overrides.provider : this.pref("provider", "deepseek");
+    const requestedProvider = has("provider") ? overrides.provider : this.pref("provider", "deepseek");
+    const p = Object.prototype.hasOwnProperty.call(this.PROVIDERS, requestedProvider)
+      ? requestedProvider
+      : "deepseek";
     const preset = this.PROVIDERS[p] || this.PROVIDERS.deepseek;
-    const customUrl = has("url") ? overrides.url : this.pref("apiUrl", "");
-    const customModel = has("model") ? overrides.model : this.pref("model", "");
-    const customKey = has("key") ? overrides.key : this.pref("apiKey", "");
+    const stored = this.getProviderConfig(p);
+    const customUrl = has("url") ? overrides.url : stored.apiUrl;
+    const customModel = has("model") ? overrides.model : stored.model;
+    const customKey = has("key") ? overrides.key : stored.apiKey;
     const url = (customUrl || "").trim() || preset.url;
     const model = (customModel || "").trim() || preset.model;
     const key = (customKey || "").trim();
@@ -1675,6 +1733,11 @@ var PaperOutline = {
   _needKey(provider) {
     const p = provider || this.pref("provider", "deepseek");
     return p !== "ollama" && p !== "custom";
+  },
+
+  _hasRequiredAIKey() {
+    const config = this._resolveAI();
+    return !this._needKey(config.provider) || !!config.key;
   },
 
   getMineruTokenStatus(overrides) {
@@ -2889,7 +2952,7 @@ var PaperOutline = {
       if (win) win.alert("请先选中至少一篇文献条目。");
       return;
     }
-    if (this._needKey() && !this.pref("apiKey", "")) {
+    if (!this._hasRequiredAIKey()) {
       if (win) win.alert("尚未填写 API Key。请到 设置 → Paper Outline 里填写。");
       return;
     }
@@ -2999,7 +3062,7 @@ var PaperOutline = {
   _onNotify(event, type, ids) {
     if (event !== "add") return;
     if (!this._autoOutlineOn() && !this._autoSummaryOn()) return; // 两个开关都关 = 不监听
-    if (this._needKey() && !this.pref("apiKey", "")) return; // 没配 Key 不打扰
+    if (!this._hasRequiredAIKey()) return; // 当前服务商没配 Key 不打扰
     const parents = new Set();
     for (const id of ids || []) {
       try {
@@ -3048,7 +3111,7 @@ var PaperOutline = {
     const wantOutline = this._autoOutlineOn();
     const wantSummary = this._autoSummaryOn();
     if (!wantOutline && !wantSummary) return;
-    if (this._needKey() && !this.pref("apiKey", "")) return;
+    if (!this._hasRequiredAIKey()) return;
 
     const att = await this._bestPdf(item);
     if (!att) return; // 没 PDF（可能还没下完）→ 等下次（再加 PDF 会再触发）

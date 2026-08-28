@@ -11,6 +11,9 @@ function loadPaperOutline(options = {}) {
       get(name) {
         return prefs[name.replace("extensions.paperoutline.", "")];
       },
+      set(name, value) {
+        prefs[name.replace("extensions.paperoutline.", "")] = value;
+      },
     },
     HTTP: { request: options.request || (async () => { throw new Error("unexpected request"); }) },
     debug() {},
@@ -207,6 +210,75 @@ test("模型刷新重试仍保留 JSON 与深度思考设置", async () => {
   assert.equal(sent[1].model, "mimo-v2.5-pro");
   assert.deepEqual(sent[1].response_format, { type: "json_object" });
   assert.deepEqual(sent[1].thinking, { type: "disabled" });
+});
+
+test("旧全局 AI 配置只迁移到当前 provider 且不覆盖已存值", () => {
+  const { outline, prefs } = loadPaperOutline({
+    prefs: {
+      provider: "mimo",
+      apiUrl: "https://legacy.example/v1/chat/completions",
+      apiKey: "legacy-key",
+      model: "legacy-model",
+      providerConfigsMigrated: false,
+      "providerConfig.mimo.model": "saved-model",
+    },
+  });
+
+  outline._migratePrefs();
+  assert.equal(prefs["providerConfig.mimo.apiUrl"], "https://legacy.example/v1/chat/completions");
+  assert.equal(prefs["providerConfig.mimo.apiKey"], "legacy-key");
+  assert.equal(prefs["providerConfig.mimo.model"], "saved-model");
+  assert.equal(prefs["providerConfig.deepseek.apiKey"], undefined);
+  assert.equal(prefs.providerConfigsMigrated, true);
+
+  prefs["providerConfig.mimo.apiKey"] = "";
+  prefs.apiKey = "must-not-return";
+  outline._migratePrefs();
+  assert.equal(prefs["providerConfig.mimo.apiKey"], "");
+});
+
+test("运行时按 provider 读取 URL、Key 和模型，不回退到别家全局值", () => {
+  const { outline, prefs } = loadPaperOutline({
+    prefs: {
+      provider: "deepseek",
+      providerConfigsMigrated: true,
+      apiUrl: "https://wrong-global.example/v1/chat/completions",
+      apiKey: "wrong-global-key",
+      model: "wrong-global-model",
+      "providerConfig.deepseek.apiUrl": "https://api.deepseek.com/chat/completions",
+      "providerConfig.deepseek.apiKey": "ds-key",
+      "providerConfig.deepseek.model": "deepseek-v4-flash",
+      "providerConfig.mimo.apiUrl": "https://api.xiaomimimo.com/v1/chat/completions",
+      "providerConfig.mimo.apiKey": "mimo-key",
+      "providerConfig.mimo.model": "mimo-v2.5",
+      "providerConfig.custom.apiUrl": "https://custom.example/v1/chat/completions",
+      "providerConfig.custom.apiKey": "custom-key",
+      "providerConfig.custom.model": "custom-model",
+    },
+  });
+
+  const deepseek = outline._resolveAI({ provider: "deepseek" });
+  const mimo = outline._resolveAI({ provider: "mimo" });
+  const custom = outline._resolveAI({ provider: "custom" });
+  assert.equal(deepseek.key, "ds-key");
+  assert.equal(deepseek.model, "deepseek-v4-flash");
+  assert.equal(mimo.key, "mimo-key");
+  assert.equal(mimo.model, "mimo-v2.5");
+  assert.equal(custom.url, "https://custom.example/v1/chat/completions");
+  assert.equal(custom.key, "custom-key");
+  assert.equal(custom.model, "custom-model");
+
+  prefs.provider = "mimo";
+  assert.equal(outline._hasRequiredAIKey(), true);
+  prefs["providerConfig.mimo.apiKey"] = "";
+  assert.equal(outline._hasRequiredAIKey(), false);
+  prefs.provider = "custom";
+  assert.equal(outline._hasRequiredAIKey(), true);
+
+  const untouched = outline._resolveAI({ provider: "openai" });
+  assert.equal(untouched.key, "");
+  assert.equal(untouched.url, "https://api.openai.com/v1/chat/completions");
+  assert.equal(untouched.model, "gpt-4o-mini");
 });
 
 test("设置页与默认偏好暴露 MiMo 和通用深度思考开关", () => {

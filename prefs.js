@@ -6,6 +6,8 @@ pref("extensions.paperoutline.provider", "deepseek");
 pref("extensions.paperoutline.apiUrl", "");
 pref("extensions.paperoutline.apiKey", "");
 pref("extensions.paperoutline.model", "");
+// v1.7.9 起 API URL / Key / 模型按服务商分别保存；旧全局配置只迁移一次。
+pref("extensions.paperoutline.providerConfigsMigrated", false);
 
 // —— 扫描 PDF 识别（MinerU 精准解析）——
 // Token 由用户自行创建；普通带文字层的 PDF 不会上传。
