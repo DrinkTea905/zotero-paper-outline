@@ -3176,7 +3176,6 @@ var PaperOutline = {
   DESPACE_BTN_ID: "paper-outline-despace-btn",
   ANNOT_BTN_ID: "paper-outline-despace-annot-bar",
   READER_INFO_ID: "paper-outline-reader-info",
-  READER_INFO_TEXT_ID: "paper-outline-reader-info-text",
   READER_INFO_COPY_ID: "paper-outline-reader-info-copy",
   READER_PDF_COPY_ID: "paper-outline-reader-pdf-copy",
 
@@ -3298,17 +3297,11 @@ var PaperOutline = {
     panel.id = this.READER_INFO_ID;
     panel.style.cssText =
       "height:26px;display:flex;align-items:center;box-sizing:border-box;overflow:hidden;" +
-      "flex:0 1 430px;min-width:260px;max-width:min(430px,42vw);margin-left:4px;" +
+      "flex:none;min-width:0;margin-left:4px;" +
       "border:1px solid var(--fill-quarternary,#d5d5d5);border-radius:7px;" +
       "background:var(--material-sidepane,rgba(255,255,255,.78));color:var(--fill-primary,#333);";
 
-    const text = doc.createElement("span");
-    text.id = this.READER_INFO_TEXT_ID;
-    text.style.cssText =
-      "min-width:0;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" +
-      "padding:0 8px;font-size:12px;line-height:24px;user-select:text;";
-
-    const makeActionButton = (id, action, label, ariaLabel, isLast) => {
+    const makeActionButton = (id, action, label, ariaLabel, isFirst, isLast) => {
       const button = doc.createElement("button");
       button.id = id;
       button.setAttribute("type", "button");
@@ -3317,8 +3310,8 @@ var PaperOutline = {
       button.setAttribute("data-paper-outline-reader-action", action);
       button.style.cssText =
         "height:24px;flex:none;display:inline-flex;align-items:center;gap:4px;padding:0 8px;" +
-        "border:0;border-left:1px solid var(--fill-quarternary,#d5d5d5);" +
-        "border-radius:" + (isLast ? "0 6px 6px 0" : "0") + ";" +
+        "border:0;border-left:" + (isFirst ? "0" : "1px solid var(--fill-quarternary,#d5d5d5)") + ";" +
+        "border-radius:" + (isFirst ? "6px 0 0 6px" : (isLast ? "0 6px 6px 0" : "0")) + ";" +
         "background:transparent;color:var(--accent-blue,#2e7dd1);font-size:11.5px;cursor:pointer;";
       button.innerHTML =
         '<svg width="13" height="13" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">' +
@@ -3332,13 +3325,12 @@ var PaperOutline = {
     };
 
     const copyInfo = makeActionButton(
-      this.READER_INFO_COPY_ID, "copy-info", "复制信息", "复制题名、作者和年份", false
+      this.READER_INFO_COPY_ID, "copy-info", "复制信息", "复制题名、作者和年份", true, false
     );
     const copyPdf = makeActionButton(
-      this.READER_PDF_COPY_ID, "copy-pdf", "复制 PDF", "复制当前 PDF 文件", true
+      this.READER_PDF_COPY_ID, "copy-pdf", "复制 PDF", "复制当前 PDF 文件", false, true
     );
 
-    panel.appendChild(text);
     panel.appendChild(copyInfo);
     panel.appendChild(copyPdf);
     this._updateReaderInfoPanel(panel, reader);
@@ -3349,14 +3341,8 @@ var PaperOutline = {
     if (!panel) return;
     const text = this._getReaderInfoText(reader);
     const shown = text || "当前 PDF 无可复制的题录信息";
-    const label = panel.querySelector && panel.querySelector("#" + this.READER_INFO_TEXT_ID);
     const copyInfo = panel.querySelector && panel.querySelector("#" + this.READER_INFO_COPY_ID);
     const copyPdf = panel.querySelector && panel.querySelector("#" + this.READER_PDF_COPY_ID);
-    if (label) {
-      label.textContent = shown;
-      label.setAttribute("title", shown);
-    }
-    panel.setAttribute("title", shown);
     if (copyInfo) {
       copyInfo.__paperOutlineReader = reader;
       copyInfo.disabled = !text;

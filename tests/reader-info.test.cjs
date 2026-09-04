@@ -169,7 +169,9 @@ function testPlacesPanelImmediatelyAfterCat() {
   assert.equal(center.children[0], cat);
   assert.equal(center.children[1].id, outline.READER_INFO_ID);
   assert.equal(center.children[2], builtIn);
-  assert.equal(center.children[1].querySelector("#" + outline.READER_INFO_TEXT_ID).textContent, "题名 - 作者 - 2024");
+  assert.equal(center.children[1].children.length, 2, "reader panel should only show two copy buttons");
+  assert.equal(center.children[1].children[0].id, outline.READER_INFO_COPY_ID);
+  assert.equal(center.children[1].children[1].id, outline.READER_PDF_COPY_ID);
   assert.match(center.children[1].querySelector("#" + outline.READER_INFO_COPY_ID).innerHTML, /复制信息/);
   assert.match(center.children[1].querySelector("#" + outline.READER_PDF_COPY_ID).innerHTML, /复制 PDF/);
   assert.equal(doc.defaultView.listenerOptions.mousedown, true);
