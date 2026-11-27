@@ -1,6 +1,7 @@
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const path = require("node:path");
+const test = require("node:test");
 const vm = require("node:vm");
 
 function loadPaperOutline(zotero) {
@@ -24,22 +25,38 @@ class MockElement {
     this.disabled = false;
   }
 
-  get firstChild() { return this.children[0] || null; }
-  get firstElementChild() { return this.firstChild; }
+  get firstChild() {
+    return this.children[0] || null;
+  }
+
+  get firstElementChild() {
+    return this.firstChild;
+  }
+
   get nextSibling() {
     if (!this.parentNode) return null;
     const index = this.parentNode.children.indexOf(this);
     return index >= 0 ? this.parentNode.children[index + 1] || null : null;
   }
 
-  setAttribute(name, value) { this.attributes[name] = String(value); }
-  getAttribute(name) { return this.attributes[name] || null; }
+  setAttribute(name, value) {
+    this.attributes[name] = String(value);
+  }
+
+  getAttribute(name) {
+    return this.attributes[name] || null;
+  }
+
   addEventListener(type, listener, options) {
     this.listeners[type] = listener;
     this.listenerOptions = this.listenerOptions || {};
     this.listenerOptions[type] = options;
   }
-  appendChild(child) { return this.insertBefore(child, null); }
+
+  appendChild(child) {
+    return this.insertBefore(child, null);
+  }
+
   insertBefore(child, before) {
     if (child.parentNode) {
       const oldIndex = child.parentNode.children.indexOf(child);
@@ -51,6 +68,7 @@ class MockElement {
     else this.children.push(child);
     return child;
   }
+
   querySelector(selector) {
     if (!selector.startsWith("#")) return null;
     const id = selector.slice(1);
@@ -63,6 +81,10 @@ class MockElement {
       return null;
     };
     return walk(this);
+  }
+
+  collectText() {
+    return [this.textContent, ...this.children.map((c) => c.collectText())].join("");
   }
 }
 
@@ -85,18 +107,31 @@ class MockDocument {
       },
     };
   }
-  createElement(tagName) { return new MockElement(tagName); }
+
+  createElement(tagName) {
+    return new MockElement(tagName);
+  }
+
+  createElementNS(_ns, tagName) {
+    return new MockElement(tagName);
+  }
+
   addEventListener(type, listener, options) {
     this.listeners[type] = listener;
     this.listenerOptions[type] = options;
   }
+
   removeEventListener(type, listener) {
     if (this.listeners[type] === listener) delete this.listeners[type];
   }
+
   querySelector(selector) {
     return selector === ".center.tools" || selector === ".toolbar .center" ? this.center : null;
   }
-  getElementById(id) { return this.center.querySelector("#" + id); }
+
+  getElementById(id) {
+    return this.center.querySelector("#" + id);
+  }
 }
 
 function makeReader(fields) {
@@ -110,7 +145,7 @@ function makeReader(fields) {
   return { _item: { parentItem } };
 }
 
-function testBuildsZoteroStyleInfoLine() {
+test("按 Zotero 标签风格拼装文献题名、作者与年份", () => {
   const outline = loadPaperOutline({ debug() {} });
   const reader = makeReader({
     title: " 犯罪统计与犯罪治理的优化 ",
@@ -119,41 +154,62 @@ function testBuildsZoteroStyleInfoLine() {
     formattedDate: "2021-10-01",
   });
   assert.equal(outline._getReaderInfoText(reader), "犯罪统计与犯罪治理的优化 - 卢建平 - 2021");
-}
+});
 
-function testHandlesPartialMetadata() {
+test("缺失部分题录元数据或无 reader 时安全降级", () => {
   const outline = loadPaperOutline({ debug() {} });
   assert.equal(outline._getReaderInfoText(makeReader({ title: "只有题名" })), "只有题名");
   assert.equal(outline._getReaderInfoText(null), "");
-}
+});
 
-function testCopiesExactDisplayedText() {
+test("copyReaderInfo 复制精确显示的文献信息并弹出提示", () => {
   let copied = "";
   let toast = null;
   const zotero = {
-    Utilities: { Internal: { copyTextToClipboard: (text) => { copied = text; } } },
+    Utilities: {
+      Internal: {
+        copyTextToClipboard: (text) => {
+          copied = text;
+        },
+      },
+    },
     debug() {},
   };
   const outline = loadPaperOutline(zotero);
-  outline._toast = (title, description) => { toast = { title, description }; };
+  outline._toast = (title, description) => {
+    toast = { title, description };
+  };
   const reader = makeReader({ title: "题名", firstCreator: "作者", date: "2024" });
   assert.equal(outline.copyReaderInfo(reader), "题名 - 作者 - 2024");
   assert.equal(copied, "题名 - 作者 - 2024");
   assert.equal(toast.title, "文献信息 · 已复制");
-}
+});
 
-function testPlacesPanelImmediatelyAfterCat() {
+test("阅读器信息工具栏紧随粉色小猫插入、采用安全 DOM 构造并正确防重复点击", () => {
   let copied = "";
   let copyCount = 0;
   let copiedAttachment = null;
   const zotero = {
-    Utilities: { Internal: { copyTextToClipboard: (text) => { copied = text; copyCount += 1; } } },
-    Prefs: { get() { return undefined; } },
+    Utilities: {
+      Internal: {
+        copyTextToClipboard: (text) => {
+          copied = text;
+          copyCount += 1;
+        },
+      },
+    },
+    Prefs: {
+      get() {
+        return undefined;
+      },
+    },
     debug() {},
   };
   const outline = loadPaperOutline(zotero);
   outline._toast = () => {};
-  outline.copyAttachmentFile = async (attachment) => { copiedAttachment = attachment; };
+  outline.copyAttachmentFile = async (attachment) => {
+    copiedAttachment = attachment;
+  };
   const center = new MockElement("div");
   const cat = new MockElement("button");
   cat.id = outline.DESPACE_BTN_ID;
@@ -172,22 +228,34 @@ function testPlacesPanelImmediatelyAfterCat() {
   assert.equal(center.children[1].children.length, 2, "reader panel should only show two copy buttons");
   assert.equal(center.children[1].children[0].id, outline.READER_INFO_COPY_ID);
   assert.equal(center.children[1].children[1].id, outline.READER_PDF_COPY_ID);
-  assert.match(center.children[1].querySelector("#" + outline.READER_INFO_COPY_ID).innerHTML, /复制信息/);
-  assert.match(center.children[1].querySelector("#" + outline.READER_PDF_COPY_ID).innerHTML, /复制 PDF/);
+
+  const copyInfo = center.children[1].querySelector("#" + outline.READER_INFO_COPY_ID);
+  const copyPdf = center.children[1].querySelector("#" + outline.READER_PDF_COPY_ID);
+  assert.equal(copyInfo.innerHTML, "", "must build button via DOM API rather than innerHTML");
+  assert.equal(copyPdf.innerHTML, "", "must build button via DOM API rather than innerHTML");
+  assert.equal(copyInfo.children[0].tagName, "svg");
+  assert.match(copyInfo.collectText(), /复制信息/);
+  assert.equal(copyPdf.children[0].tagName, "svg");
+  assert.match(copyPdf.collectText(), /复制 PDF/);
   assert.equal(doc.defaultView.listenerOptions.mousedown, true);
   assert.equal(doc.defaultView.listenerOptions.click, true);
 
   outline._injectReaderInfoPanel({ doc, reader });
   assert.equal(center.children.length, 3);
-  const copyInfo = center.children[1].querySelector("#" + outline.READER_INFO_COPY_ID);
-  const copyPdf = center.children[1].querySelector("#" + outline.READER_PDF_COPY_ID);
+
   const eventCalls = { preventDefault: 0, stopPropagation: 0, stopImmediatePropagation: 0 };
   doc.defaultView.listeners.mousedown({
     target: copyInfo,
     button: 0,
-    preventDefault() { eventCalls.preventDefault += 1; },
-    stopPropagation() { eventCalls.stopPropagation += 1; },
-    stopImmediatePropagation() { eventCalls.stopImmediatePropagation += 1; },
+    preventDefault() {
+      eventCalls.preventDefault += 1;
+    },
+    stopPropagation() {
+      eventCalls.stopPropagation += 1;
+    },
+    stopImmediatePropagation() {
+      eventCalls.stopImmediatePropagation += 1;
+    },
   });
   assert.equal(copied, "题名 - 作者 - 2024");
   assert.equal(copyCount, 1);
@@ -218,25 +286,13 @@ function testPlacesPanelImmediatelyAfterCat() {
     stopImmediatePropagation() {},
   });
   assert.equal(copiedAttachment, null, "right click must not trigger PDF copying");
-}
+});
 
-function testUsesRedrawnCatIconEverywhere() {
+test("全局统一使用重绘后的粉色小猫图标", () => {
   const outline = loadPaperOutline({ debug() {} });
   const svg = outline._catIconSVG(20);
   assert.match(svg, /width="20"/);
   assert.match(svg, /stroke="#D9438E"/);
   assert.match(svg, /FFD3E8/);
   assert.doesNotMatch(svg, /M4 3\.8 L9\.4 9/);
-}
-
-try {
-  testBuildsZoteroStyleInfoLine();
-  testHandlesPartialMetadata();
-  testCopiesExactDisplayedText();
-  testPlacesPanelImmediatelyAfterCat();
-  testUsesRedrawnCatIconEverywhere();
-  console.log("reader-info tests passed");
-} catch (error) {
-  console.error(error);
-  process.exitCode = 1;
-}
+});

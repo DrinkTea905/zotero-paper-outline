@@ -1,30 +1,31 @@
-# Build .xpi for Paper Outline GPT
-# Run:  powershell -ExecutionPolicy Bypass -File .\打包.ps1
-# (ASCII-only on purpose: Windows PowerShell 5.1 mis-decodes non-BOM UTF-8 Chinese in .ps1)
+﻿# Paper Outline XPI 一键打包脚本
+# 用法：powershell -ExecutionPolicy Bypass -File .\打包.ps1
+# 本脚本委托 python -B build_xpi.py --run-tests 完成校验、测试、原子打包与哈希同步。
 
 $ErrorActionPreference = "Stop"
 $src = $PSScriptRoot
-$zip = Join-Path $src "paper-outline-gpt.zip"
+$script = Join-Path $src "build_xpi.py"
+
+if (-not (Test-Path -LiteralPath $script)) {
+    throw "未找到打包脚本：$script"
+}
+
+$pythonCmd = Get-Command python -ErrorAction SilentlyContinue
+if (-not $pythonCmd) {
+    throw "未找到 python 命令，请先安装 Python 3 并加入 PATH。"
+}
+
+Push-Location -LiteralPath $src
+try {
+    & $pythonCmd.Source -B "build_xpi.py" --run-tests @args
+    if ($LASTEXITCODE -ne 0) {
+        exit $LASTEXITCODE
+    }
+}
+finally {
+    Pop-Location
+}
+
 $xpi = Join-Path $src "paper-outline-gpt.xpi"
-
-$names = @(
-    "manifest.json",
-    "bootstrap.js",
-    "paperOutline.js",
-    "prefs.js",
-    "preferences.xhtml",
-    "preferences.js",
-    "preferences.css",
-    "icons"
-)
-$files = @()
-foreach ($n in $names) { $files += (Join-Path $src $n) }
-
-if (Test-Path $zip) { Remove-Item $zip -Force }
-if (Test-Path $xpi) { Remove-Item $xpi -Force }
-
-Compress-Archive -Path $files -DestinationPath $zip -Force
-Rename-Item -Path $zip -NewName "paper-outline-gpt.xpi"
-
-Write-Host "[OK] Built:" $xpi
-Write-Host "Install: Zotero -> Tools -> Plugins -> gear -> Install Add-on From File -> pick the .xpi"
+Write-Host ""
+Write-Host "安装方式：Zotero -> 工具 -> 插件 -> 右上角齿轮 -> Install Add-on From File -> 选择 $xpi"

@@ -1,9 +1,15 @@
 # 构建产物（由 build_xpi.py / 打包.ps1 生成，不入源码库；发布时作为 Release 附件）
 *.xpi
+*.zip
+*.tmp
 
 # Python 缓存
 __pycache__/
 *.pyc
+
+# 本地测试与依赖
+local-tests/
+node_modules/
 
 # 编辑器 / 系统
 .vscode/

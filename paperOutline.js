@@ -8,15 +8,28 @@
 var PaperOutline = {
   id: null,
   rootURI: null,
+  _shuttingDown: false,
+  _prefPaneID: "paper-outline-prefpane",
   _addedWindows: new Set(),
+  _readerOutlineListener: null,
+  _despaceToolbarListener: null,
+  _despaceAnnotListener: null,
+  _copyFileKeyWindows: null,
+  _modelListCache: null,
+  _modelMetaCache: null,
+  _cacheSaveChain: null,
   MINERU_API_BASE: "https://mineru.net/api/v4",
   MINERU_TOKEN_URL: "https://mineru.net/apiManage/token",
   MINERU_TOKEN_DAYS: 90,
   MINERU_WARNING_DAYS: 14,
+  MINERU_MAX_UPLOAD_BYTES: 200 * 1024 * 1024,
+  MINERU_MAX_ZIP_BYTES: 100 * 1024 * 1024,
   _mineruTextCache: null,
+  _mineruInFlight: null,
   _mineruReminderTimer: null,
 
   init({ id, version, rootURI }) {
+    this._shuttingDown = false;
     this.id = id;
     this.version = version;
     this.rootURI = rootURI;
@@ -26,12 +39,30 @@ var PaperOutline = {
     try { this._scheduleMineruExpiryReminder(); } catch (e) {}
   },
 
-  // 旧版偏好迁移：openai.* → 统一的 apiKey/apiUrl/model（仅在新键为空时复制，保住用户已填配置）
+  // 旧版偏好迁移：
+  // 1) openai.* → 统一的 apiKey/apiUrl/model，并清除旧明文 Key
+  // 2) 旧 provider === "openai" 无损迁移到 custom（补齐 OpenAI 默认地址）
+  // 3) 全局配置按服务商分桶迁移
+  // 4) 清理已知过时默认模型，置空以便自动追新发现
   _migratePrefs() {
     const P = "extensions.paperoutline.";
     const get = (k) => Zotero.Prefs.get(P + k, true);
     const set = (k, v) => Zotero.Prefs.set(P + k, v, true);
-    if (!get("apiKey") && get("openai.apiKey")) set("apiKey", get("openai.apiKey"));
+    const clearKey = (k) => {
+      try {
+        if (typeof Zotero.Prefs.clear === "function") {
+          Zotero.Prefs.clear(P + k, true);
+          return;
+        }
+      } catch (e) {}
+      try { set(k, ""); } catch (e) {}
+    };
+
+    const legacyOpenAIKey = get("openai.apiKey");
+    if (!get("apiKey") && legacyOpenAIKey) set("apiKey", legacyOpenAIKey);
+    if (legacyOpenAIKey !== undefined && legacyOpenAIKey !== null && legacyOpenAIKey !== "") {
+      clearKey("openai.apiKey");
+    }
     if (!get("model") && get("openai.model")) set("model", get("openai.model"));
     const oldUrl = get("openai.apiUrl");
     // 仅迁移用户自定义过的 URL（旧默认 deepseek 地址不迁，留空走预设，便于切换服务商）
@@ -39,27 +70,90 @@ var PaperOutline = {
       set("apiUrl", oldUrl);
     }
 
-    // DeepSeek 于 2026-07-24 停止支持旧模型名 deepseek-chat。
-    // 仅迁移官方 DeepSeek 端点；自定义中转可能仍把该名称作为别名，必须保留用户配置。
-    const requestedProvider = get("provider") || "deepseek";
-    const provider = Object.prototype.hasOwnProperty.call(this.PROVIDERS, requestedProvider)
-      ? requestedProvider
-      : "deepseek";
-    const model = String(get("model") || "").trim();
-    const apiUrl = String(get("apiUrl") || "").trim().replace(/\/+$/, "");
-    const officialDeepSeek =
-      !apiUrl ||
-      apiUrl === "https://api.deepseek.com/chat/completions" ||
-      apiUrl === "https://api.deepseek.com/v1/chat/completions";
-    if (provider === "deepseek" && model === "deepseek-chat" && officialDeepSeek) {
-      set("model", "");
+    const migrated = get("providerConfigsMigrated") === true;
+    const requestedProvider = String(get("provider") || "deepseek").trim() || "deepseek";
+    let provider;
+
+    if (requestedProvider === "openai") {
+      const readLegacyOpenAI = (key) => {
+        const scoped = get("providerConfig.openai." + key);
+        if (scoped !== undefined && scoped !== null && String(scoped).trim()) {
+          return String(scoped).trim();
+        }
+        if (!migrated) {
+          const globalVal = get(key);
+          if (globalVal !== undefined && globalVal !== null && String(globalVal).trim()) {
+            return String(globalVal).trim();
+          }
+        }
+        return "";
+      };
+      const existingCustom = this.getProviderConfig("custom");
+      const oaKey = readLegacyOpenAI("apiKey");
+      const oaModel = readLegacyOpenAI("model");
+      const oaUrl = readLegacyOpenAI("apiUrl") || "https://api.openai.com/v1/chat/completions";
+      this.saveProviderConfig(
+        "custom",
+        {
+          apiUrl: oaUrl || existingCustom.apiUrl || "https://api.openai.com/v1/chat/completions",
+          apiKey: oaKey || existingCustom.apiKey || "",
+          model: oaModel || existingCustom.model || "",
+        },
+        true
+      );
+      clearKey("providerConfig.openai.apiKey");
+      set("providerConfigsMigrated", true);
+      provider = "custom";
+    } else {
+      provider = Object.prototype.hasOwnProperty.call(this.PROVIDERS, requestedProvider)
+        ? requestedProvider
+        : "deepseek";
+      // v1.7.9：把旧版「当前全局」AI 配置迁移到当前服务商名下。
+      // 其他服务商保持空配置，切换时不再误用当前服务商的 Key/URL/模型。
+      if (!migrated) {
+        this.saveProviderConfig(provider, this.getProviderConfig(provider), true);
+        set("providerConfigsMigrated", true);
+      }
     }
 
-    // v1.7.9：把旧版「当前全局」AI 配置迁移到当前服务商名下。
-    // 其他服务商保持空配置，切换时不再误用当前服务商的 Key/URL/模型。
-    if (!get("providerConfigsMigrated")) {
-      this.saveProviderConfig(provider, this.getProviderConfig(provider), true);
-      set("providerConfigsMigrated", true);
+    // 清理已知过时默认模型，置空以便自动走 /models 追新发现。
+    // 仅清理官方端点下的过时值；自定义中转可能仍使用旧别名，必须保留用户配置。
+    const obsoleteByProvider = {
+      deepseek: {
+        models: ["deepseek-chat"],
+        officialUrls: [
+          "",
+          "https://api.deepseek.com/chat/completions",
+          "https://api.deepseek.com/v1/chat/completions",
+        ],
+      },
+      mimo: {
+        models: ["mimo-v2.5", "mimo-v2.5-pro"],
+        officialUrls: ["", "https://api.xiaomimimo.com/v1/chat/completions"],
+      },
+      moonshot: {
+        models: ["moonshot-v1-8k"],
+        officialUrls: ["", "https://api.moonshot.cn/v1/chat/completions"],
+      },
+    };
+    for (const [p, rule] of Object.entries(obsoleteByProvider)) {
+      const scopedModel = String(get("providerConfig." + p + ".model") || "").trim();
+      const scopedUrl = String(get("providerConfig." + p + ".apiUrl") || "")
+        .trim()
+        .replace(/\/+$/, "");
+      if (scopedModel && rule.models.includes(scopedModel) && rule.officialUrls.includes(scopedUrl)) {
+        set("providerConfig." + p + ".model", "");
+        if (provider === p) set("model", "");
+      } else if (provider === p) {
+        const globalModel = String(get("model") || "").trim();
+        const globalUrl = String(get("apiUrl") || "")
+          .trim()
+          .replace(/\/+$/, "");
+        if (globalModel && rule.models.includes(globalModel) && rule.officialUrls.includes(globalUrl)) {
+          set("model", "");
+          if (!scopedModel) set("providerConfig." + p + ".model", "");
+        }
+      }
     }
 
     // 旧版本没有保存 Token 录入时间；升级后从首次读取时开始估算 90 天有效期。
@@ -85,12 +179,12 @@ var PaperOutline = {
     "为每个章节给出不超过 60 字的中文核心总结，提炼主要观点，" +
     "可采用「总结了…，指出了…，讨论了…，强调了…」这类句式。" +
     "只输出 JSON，格式严格为：" +
-    '{"outline":[{"level":1,"title":"章节标题","summary":"核心总结"}]}。' +
+    '{"outline":[{"level":1,"title":"章节标题","rawTitle":"原文精确标题","summary":"核心总结"}]}。' +
     "level 表示层级（1 为一级标题，2 为二级，以此类推）。" +
     "title 必须带序号前缀：优先保留原文的章节序号（如 一、二、、（一）（二）、1. 2.、(1)(2) 等）；" +
     "若原文标题没有显式序号，按层级自动补全——一级用「一、二、三、…」，二级用「（一）（二）（三）…」，" +
     "三级用「1. 2. 3. …」，四级用「(1)(2)(3)…」，同级按出现顺序连续编号。" +
-    "若原文章节标题是英文，title 请翻译成中文（序号保留）。不要输出 JSON 以外的任何文字。",
+    "若原文章节标题是英文，title 请翻译成中文（序号保留），同时 rawTitle 必须保留原文中的精确英文标题（中文论文则 rawTitle 与原文标题一致）。不要输出 JSON 以外的任何文字。",
 
   // 整篇总结提示词（默认；设置里可改，清空回落到此）。AI 用 Markdown 输出，写入笔记时转 HTML。
   SUMMARY_PROMPT:
@@ -102,6 +196,39 @@ var PaperOutline = {
     "4. 保留关键数据、典型案例、核心制度规则与重要学术观点；\n" +
     "5. 使用分级标题+要点的结构化排版，逻辑清晰，重点信息加粗标注；\n" +
     "6. 抓主干、不遗漏核心结论；宁可凝练也不要超过 1000 字。",
+
+  // 多学科整篇总结模板预设（humanities 保留原版 SUMMARY_PROMPT）
+  SUMMARY_PROMPT_PRESETS: {
+    general:
+      "请总结这篇学术论文的核心内容（你的输出必须是简体中文）。直接输出总结正文，" +
+      "不要任何开场白或客套话（例如「好的」「以下是……的总结」等），也不要复述论文标题。要求：\n" +
+      "1. 全文控制在 1000 字以内；\n" +
+      "2. 先一句话概括研究问题、研究对象与核心论点；\n" +
+      "3. 分模块梳理：研究背景与文献脉络、理论框架与研究方法、核心发现与论证逻辑、主要结论、学术贡献与局限；\n" +
+      "4. 保留关键数据、代表性证据与核心概念定义；\n" +
+      "5. 使用分级标题+要点的结构化 Markdown 排版，重点信息加粗标注。",
+    humanities:
+      "请总结这篇学术论文的核心内容（你的输出必须是简体中文）。直接输出总结正文，" +
+      "不要任何开场白或客套话（例如「好的」「以下是……的总结」等），也不要复述论文标题。要求：\n" +
+      "1. 全文控制在 1000 字以内；\n" +
+      "2. 先点明论文的核心研究问题、研究对象与全文核心观点；\n" +
+      "3. 按论文行文逻辑分模块梳理，覆盖研究背景、制度沿革、核心论证、史料依据、结论与现实启示；\n" +
+      "4. 保留关键数据、典型案例、核心制度规则与重要学术观点；\n" +
+      "5. 使用分级标题+要点的结构化排版，逻辑清晰，重点信息加粗标注；\n" +
+      "6. 抓主干、不遗漏核心结论；宁可凝练也不要超过 1000 字。",
+    stem:
+      "请总结这篇理工/实证研究论文的核心内容（你的输出必须是简体中文）。直接输出总结正文，" +
+      "不要任何开场白或客套话（例如「好的」「以下是……的总结」等），也不要复述论文标题。要求：\n" +
+      "1. 全文控制在 1000 字以内；\n" +
+      "2. 分模块梳理：研究痛点与动机、核心方法/模型架构/实验设计、数据集与评估指标、主要量化结果与消融对比、结论与局限性；\n" +
+      "3. 准确保留关键指标数值、基线对比幅度、核心公式或机制原理；\n" +
+      "4. 使用分级标题+要点（必要时可用简洁表格）的结构化 Markdown 排版，重点指标加粗标注。",
+    brief:
+      "请对这篇论文做极简速览总结（你的输出必须是简体中文）。直接输出正文，不要开场白，也不要复述标题。要求：\n" +
+      "1. 全文控制在 400 字以内；\n" +
+      "2. 按三部分输出：「## 一句话主旨」「## 核心论点（3–5 条）」「## 关键证据与结论」；\n" +
+      "3. 高度凝练、重点信息加粗，便于 30 秒内掌握全文主干。",
+  },
 
   // 未知模型继续使用旧版 60,000 字符的保守上限；已知模型按上下文窗口动态计算。
   SUMMARY_FALLBACK_MAX_CHARS: 60000,
@@ -133,8 +260,9 @@ var PaperOutline = {
 
   registerMenu() {
     if (Zotero.MenuManager && typeof Zotero.MenuManager.registerMenu === "function") {
+      this._registeredMenuIDs = [];
+      let itemMenuOk = false;
       try {
-        this._registeredMenuIDs = [];
         const itemMenuID = Zotero.MenuManager.registerMenu({
           menuID: this._menuID,
           pluginID: this.id,
@@ -179,8 +307,13 @@ var PaperOutline = {
           ],
         });
         this._registeredMenuIDs.push(itemMenuID || this._menuID);
+        itemMenuOk = true;
+      } catch (e) {
+        this.log("MenuManager.registerMenu (main/library/item) failed: " + e);
+      }
 
-        const reviveMenu = (target, menuID) => {
+      const reviveMenu = (target, menuID) => {
+        try {
           const registeredID = Zotero.MenuManager.registerMenu({
             menuID,
             pluginID: this.id,
@@ -201,21 +334,18 @@ var PaperOutline = {
             ],
           });
           this._registeredMenuIDs.push(registeredID || menuID);
-        };
+        } catch (e) {
+          this.log("MenuManager.registerMenu (" + target + ") failed: " + e);
+        }
+      };
+      if (itemMenuOk) {
         reviveMenu("main/menubar/tools", this._reviveMenuID);
         reviveMenu("reader/menubar/view", this._reviveReaderMenuID);
         this._usedMenuManager = true;
         this.log("menus registered via MenuManager");
         return;
-      } catch (e) {
-        try {
-          for (const menuID of this._registeredMenuIDs) {
-            try { Zotero.MenuManager.unregisterMenu(menuID); } catch (e3) {}
-          }
-        } catch (e2) {}
-        this._registeredMenuIDs = [];
-        this.log("MenuManager.registerMenu failed, fallback to DOM: " + e);
       }
+      this._registeredMenuIDs = [];
     }
     // Zotero 7 退化路径
     this._usedMenuManager = false;
@@ -255,6 +385,18 @@ var PaperOutline = {
         mi.setAttribute("label", this.MENU_LABEL);
         mi.addEventListener("command", () => this.runOnSelected());
         itemMenu.appendChild(mi);
+        const mc = doc.createXULElement("menuitem");
+        mc.id = "paper-outline-copyfile-menuitem";
+        mc.setAttribute("label", "📋 复制 PDF 文件");
+        mc.addEventListener("command", () => this.copySelectedFile());
+        itemMenu.appendChild(mc);
+        const onPopupShowing = () => {
+          try {
+            mc.hidden = !PaperOutline.pref("copyFile", true);
+          } catch (e) {}
+        };
+        itemMenu.addEventListener("popupshowing", onPopupShowing);
+        window.__poItemMenuShowing = { itemMenu, onPopupShowing };
       }
 
       const toolsMenu = doc.getElementById("menu_ToolsPopup");
@@ -279,8 +421,18 @@ var PaperOutline = {
 
   removeFromWindow(window) {
     try {
+      if (window.__poItemMenuShowing) {
+        try {
+          window.__poItemMenuShowing.itemMenu.removeEventListener(
+            "popupshowing",
+            window.__poItemMenuShowing.onPopupShowing
+          );
+        } catch (e) {}
+        try { delete window.__poItemMenuShowing; } catch (e) {}
+      }
       window.document.getElementById("paper-outline-menuitem")?.remove();
       window.document.getElementById("paper-outline-summary-menuitem")?.remove();
+      window.document.getElementById("paper-outline-copyfile-menuitem")?.remove();
       window.document.getElementById("paper-outline-revive-menuitem")?.remove();
       this._addedWindows.delete(window);
     } catch (e) {
@@ -294,17 +446,32 @@ var PaperOutline = {
 
   HTML_NS: "http://www.w3.org/1999/xhtml",
 
+  _getReaderAttachment(reader) {
+    if (!reader) return null;
+    if (reader._item) return reader._item;
+    try {
+      if (reader.itemID && Zotero && Zotero.Items && typeof Zotero.Items.get === "function") {
+        return Zotero.Items.get(reader.itemID) || null;
+      }
+    } catch (e) {}
+    return null;
+  },
+
   // ── 阅读器左侧「大纲」栏注入（DOM 注入 reader iframe，参考 jasminum）──
   registerReaderOutline() {
     try {
       if (Zotero.Reader && typeof Zotero.Reader.registerEventListener === "function") {
-        Zotero.Reader.registerEventListener(
-          "renderToolbar",
-          (event) => {
+        if (!this._readerOutlineListener) {
+          this._readerOutlineListener = (event) => {
+            if (typeof PaperOutline === "undefined" || PaperOutline._shuttingDown) return;
             PaperOutline._injectReaderOutline(event.reader);
-          },
-          this.id
-        );
+          };
+          Zotero.Reader.registerEventListener(
+            "renderToolbar",
+            this._readerOutlineListener,
+            this.id
+          );
+        }
         // 处理已经打开的阅读器
         try {
           (Zotero.Reader._readers || []).forEach((r) => PaperOutline._injectReaderOutline(r));
@@ -313,6 +480,84 @@ var PaperOutline = {
       }
     } catch (e) {
       this.log("registerReaderOutline error: " + e);
+    }
+  },
+
+  unregisterReaderOutline() {
+    try {
+      if (
+        this._readerOutlineListener &&
+        Zotero.Reader &&
+        typeof Zotero.Reader.unregisterEventListener === "function"
+      ) {
+        try {
+          Zotero.Reader.unregisterEventListener("renderToolbar", this._readerOutlineListener);
+        } catch (e) {}
+      }
+      this._readerOutlineListener = null;
+
+      ((Zotero.Reader && Zotero.Reader._readers) || []).forEach((reader) => {
+        if (!reader) return;
+        try {
+          const rw = reader._iframeWindow;
+          const doc = rw && rw.document;
+          if (doc) {
+            const box = doc.getElementById("paper-outline-reader");
+            if (box) box.remove();
+            const st = doc.getElementById("paper-outline-style");
+            if (st) st.remove();
+            const ov = doc.getElementById("outlineView");
+            if (ov) ov.style.display = "";
+          }
+        } catch (e) {}
+        try {
+          if (reader._paperOutlineObserver) {
+            reader._paperOutlineObserver.disconnect();
+            reader._paperOutlineObserver = null;
+            reader._paperOutlineObserverDoc = null;
+          }
+        } catch (e) {}
+        try {
+          if (reader._poSidebarClickDoc && reader._poSidebarClickHandler) {
+            reader._poSidebarClickDoc.removeEventListener(
+              "click",
+              reader._poSidebarClickHandler,
+              true
+            );
+          }
+          reader._poSidebarClickDoc = null;
+          reader._poSidebarClickHandler = null;
+        } catch (e) {}
+        try {
+          if (
+            reader._poEnsureEventBus &&
+            reader._poDocLoadedHandler &&
+            typeof reader._poEnsureEventBus.off === "function"
+          ) {
+            reader._poEnsureEventBus.off("documentloaded", reader._poDocLoadedHandler);
+          }
+          reader._poEnsureEventBus = null;
+          reader._poDocLoadedHandler = null;
+        } catch (e) {}
+        try {
+          if (
+            reader._poPageEventBus &&
+            reader._poPageChangingHandler &&
+            typeof reader._poPageEventBus.off === "function"
+          ) {
+            reader._poPageEventBus.off("pagechanging", reader._poPageChangingHandler);
+          }
+          reader._poPageEventBus = null;
+          reader._poPageChangingHandler = null;
+        } catch (e) {}
+        try {
+          reader._paperOutlineSwitched = false;
+          reader._poCachedPageRepairStarted = false;
+        } catch (e) {}
+      });
+      this._readerEnsure = null;
+    } catch (e) {
+      this.log("unregisterReaderOutline error: " + e);
     }
   },
 
@@ -499,7 +744,7 @@ var PaperOutline = {
         if (app0 && app0.initializedPromise) await app0.initializedPromise;
       } catch (e) {}
 
-      const att = reader._item;
+      const att = this._getReaderAttachment(reader);
       const item = att && att.parentItem ? att.parentItem : att;
 
       // 等外层侧栏内容容器就绪（最多 ~2.5s）
@@ -512,6 +757,7 @@ var PaperOutline = {
       // 注入：仅当面板缺失时重建。Zotero 收起侧栏时可能销毁 sidebarContent，
       // 重新展开后会创建一个全新的容器，因此每次都重新查询当前宿主，不能保存旧节点引用。
       const ensureInjected = () => {
+        if (typeof PaperOutline === "undefined" || PaperOutline._shuttingDown) return false;
         try {
           const host = doc.getElementById("sidebarContent");
           if (!host) {
@@ -561,6 +807,7 @@ var PaperOutline = {
           } catch (e) {}
         }
         const sidebarClickHandler = (event) => {
+          if (typeof PaperOutline === "undefined" || PaperOutline._shuttingDown) return;
           let target = event && event.target;
           while (target && target !== doc) {
             const id = target.id || (target.getAttribute && target.getAttribute("id"));
@@ -589,6 +836,7 @@ var PaperOutline = {
         if (root && rw.MutationObserver) {
           let pending = false;
           const mo = new rw.MutationObserver(() => {
+            if (typeof PaperOutline === "undefined" || PaperOutline._shuttingDown) return;
             const currentHost = doc.getElementById("sidebarContent");
             if (!currentHost || currentHost.querySelector("#paper-outline-reader") || pending) return;
             pending = true;
@@ -608,8 +856,16 @@ var PaperOutline = {
         const app1 = this._getReaderApp(reader);
         const eb = app1 && app1.eventBus;
         if (eb && reader._poEnsureEventBus !== eb) {
+          if (reader._poEnsureEventBus && reader._poDocLoadedHandler && typeof reader._poEnsureEventBus.off === "function") {
+            try { reader._poEnsureEventBus.off("documentloaded", reader._poDocLoadedHandler); } catch (e) {}
+          }
+          const docLoadedHandler = () => {
+            if (typeof PaperOutline === "undefined" || PaperOutline._shuttingDown) return;
+            rw.setTimeout(ensureInjected, 80);
+          };
           reader._poEnsureEventBus = eb;
-          eb.on("documentloaded", () => rw.setTimeout(ensureInjected, 80));
+          reader._poDocLoadedHandler = docLoadedHandler;
+          eb.on("documentloaded", docLoadedHandler);
         }
       } catch (e2) {}
 
@@ -618,14 +874,20 @@ var PaperOutline = {
         const app2 = this._getReaderApp(reader);
         const eb2 = app2 && app2.eventBus;
         if (eb2 && reader._poPageEventBus !== eb2) {
-          reader._poPageEventBus = eb2;
-          eb2.on("pagechanging", (e) => {
+          if (reader._poPageEventBus && reader._poPageChangingHandler && typeof reader._poPageEventBus.off === "function") {
+            try { reader._poPageEventBus.off("pagechanging", reader._poPageChangingHandler); } catch (e) {}
+          }
+          const pageChangingHandler = (e) => {
+            if (typeof PaperOutline === "undefined" || PaperOutline._shuttingDown) return;
             const pn =
               (e && (e.pageNumber || e.pageLabel)) ||
               (app2.pdfViewer && app2.pdfViewer.currentPageNumber) ||
               1;
             rw.setTimeout(() => PaperOutline._highlightReaderOutline(doc, parseInt(pn, 10) || 1), 30);
-          });
+          };
+          reader._poPageEventBus = eb2;
+          reader._poPageChangingHandler = pageChangingHandler;
+          eb2.on("pagechanging", pageChangingHandler);
         }
       } catch (e2) {}
 
@@ -647,10 +909,28 @@ var PaperOutline = {
     }
   },
 
+  _outlineToMarkdown(outline, title) {
+    const lines = [];
+    if (title) lines.push("# " + String(title).trim(), "");
+    for (const s of outline || []) {
+      const lv = Math.max(1, Math.min(6, parseInt(s && s.level, 10) || 1));
+      const indent = "  ".repeat(lv - 1);
+      const heading = String((s && s.title) || "").trim();
+      if (!heading) continue;
+      const pg = parseInt(s && s.page, 10);
+      const pageTag = pg > 0 ? " (p." + pg + ")" : "";
+      const summary = String((s && s.summary) || "").trim();
+      lines.push(indent + "- **" + heading + "**" + pageTag + (summary ? "：" + summary : ""));
+    }
+    return lines.join("\n");
+  },
+
   _renderReaderOutline(doc, host, item, reader) {
     const HTML = this.HTML_NS;
     const mk = (tag, css, text, cls) => {
-      const e = doc.createElementNS(HTML, tag);
+      const e = typeof doc.createElementNS === "function"
+        ? doc.createElementNS(HTML, tag)
+        : doc.createElement(tag);
       if (css) e.setAttribute("style", css);
       if (cls) e.setAttribute("class", cls);
       if (text != null) e.textContent = text;
@@ -701,17 +981,54 @@ var PaperOutline = {
       return;
     }
 
-    // 工具条：两个胶囊按钮 —— 展开/收起（切换）、重新生成
+    // 工具条：展开/收起、逐节摘要开关、复制 Markdown 大纲、重新生成
     const bar = mk("div", null, null, "po-toolbar");
     const tToggle = mk("span", null, "⇕ 展开/收起", "po-tbtn");
     tToggle.addEventListener("click", () => PaperOutline._toggleAllReader(box));
+    bar.appendChild(tToggle);
+
+    const hasSummaries = outline.some((s) => s && s.summary && String(s.summary).trim());
+    if (hasSummaries) {
+      const tSum = mk("span", null, "📝 摘要", "po-tbtn");
+      if (box.classList && box.classList.contains("po-show-summaries")) {
+        tSum.classList.add("po-tbtn-active");
+      }
+      tSum.setAttribute("title", "展开或收起每节核心摘要");
+      tSum.addEventListener("click", () => {
+        const shown = box.classList.toggle("po-show-summaries");
+        tSum.classList.toggle("po-tbtn-active", shown);
+      });
+      bar.appendChild(tSum);
+    }
+
+    const tCopy = mk("span", null, "📋 复制大纲", "po-tbtn");
+    tCopy.setAttribute("title", "复制 Markdown 格式大纲到剪贴板");
+    tCopy.addEventListener("click", () => {
+      try {
+        const title = item && typeof item.getField === "function" ? item.getField("title") : "";
+        const md = PaperOutline._outlineToMarkdown(outline, title);
+        const UI = Zotero.Utilities && Zotero.Utilities.Internal;
+        if (!UI || typeof UI.copyTextToClipboard !== "function") {
+          throw new Error("剪贴板接口不可用");
+        }
+        UI.copyTextToClipboard(md);
+        const orig = tCopy.textContent;
+        tCopy.textContent = "✓ 已复制";
+        const rw = reader && reader._iframeWindow;
+        if (rw && rw.setTimeout) rw.setTimeout(() => { tCopy.textContent = orig; }, 1500);
+        PaperOutline._toast("Paper Outline · 已复制大纲", "已复制 Markdown 大纲（共 " + outline.length + " 节）");
+      } catch (e) {
+        PaperOutline._toast("Paper Outline · 复制失败", String(e));
+      }
+    });
+    bar.appendChild(tCopy);
+
     const tRe = mk("span", null, "↻ 重新生成", "po-tbtn");
     tRe.addEventListener("click", () => PaperOutline._doGenerate(doc, host, item, reader, true));
-    bar.appendChild(tToggle);
     bar.appendChild(tRe);
     box.appendChild(bar);
 
-    // 目录树（可折叠）
+    // 目录树（可折叠 + 可选逐节摘要）
     const lvOf = (s) => Math.max(1, Math.min(6, parseInt(s.level, 10) || 1));
     for (let i = 0; i < outline.length; i++) {
       const s = outline[i];
@@ -721,6 +1038,7 @@ var PaperOutline = {
       row.setAttribute("data-idx", String(i));
       row.setAttribute("data-level", String(lv));
       if (pg > 0) row.setAttribute("data-page", String(pg));
+      const head = mk("div", null, null, "po-item-head");
       const hasChild = i + 1 < outline.length && lvOf(outline[i + 1]) > lv;
       const tg = mk("span", null, hasChild ? "▾" : "", "po-toggle" + (hasChild ? "" : " po-leaf"));
       if (hasChild) {
@@ -729,8 +1047,12 @@ var PaperOutline = {
           PaperOutline._toggleCollapse(box, i);
         });
       }
-      row.appendChild(tg);
-      row.appendChild(mk("span", null, s.title || "", "po-text"));
+      head.appendChild(tg);
+      head.appendChild(mk("span", null, s.title || "", "po-text"));
+      row.appendChild(head);
+      if (s.summary && String(s.summary).trim()) {
+        row.appendChild(mk("div", null, String(s.summary).trim(), "po-summary"));
+      }
       if (s.summary || pg) {
         row.setAttribute("title", (s.summary || "") + (pg ? (s.summary ? "\n" : "") + "→ 第 " + pg + " 页" : ""));
       }
@@ -807,7 +1129,7 @@ var PaperOutline = {
     const HTML = this.HTML_NS;
     box.textContent = "";
     const msg = doc.createElementNS(HTML, "div");
-    msg.setAttribute("style", "color:#c0392b;font-size:12px;margin:6px 2px;line-height:1.6;");
+    msg.setAttribute("class", "po-error-msg");
     msg.textContent = "⚠ " + (e && e.message ? e.message : String(e));
     box.appendChild(msg);
     const retry = doc.createElementNS(HTML, "button");
@@ -913,7 +1235,7 @@ var PaperOutline = {
     } catch (e) {}
   },
 
-  // 注入面板样式（每个 reader 文档一次）：层级字体 + 悬停 + 当前高亮 + 折叠箭头 + 转圈，跟随主题色
+  // 注入面板样式（每个 reader 文档一次）：层级字体 + 悬停 + 当前高亮 + 折叠箭头 + 摘要开关 + 转圈，跟随主题色
   _injectReaderStyle(doc) {
     try {
       if (doc.getElementById("paper-outline-style")) return;
@@ -928,17 +1250,22 @@ var PaperOutline = {
         '#paper-outline-reader .po-status-testing{background:rgba(154,103,0,.10);color:#9a6700;}',
         '#paper-outline-reader .po-status-success{background:rgba(32,131,60,.11);color:#20833c;}',
         '#paper-outline-reader .po-status-error{background:rgba(198,61,61,.10);color:#b72f2f;}',
-        '#paper-outline-reader .po-toolbar{display:flex;flex-wrap:wrap;gap:8px;margin:2px 2px 12px;}',
-        '#paper-outline-reader .po-tbtn{display:inline-flex;align-items:center;gap:4px;font-size:12px;padding:4px 14px;border-radius:14px;border:1px solid var(--fill-quarternary,#d4d4d4);background:var(--fill-quinary,rgba(0,0,0,.035));color:var(--fill-secondary,#555);cursor:pointer;user-select:none;transition:background .12s,color .12s,border-color .12s;}',
-        '#paper-outline-reader .po-tbtn:hover{background:var(--accent-blue,#2e7dd1);border-color:var(--accent-blue,#2e7dd1);color:#fff;}',
+        '#paper-outline-reader .po-error-msg{color:#b72f2f;font-size:12px;margin:6px 2px;line-height:1.6;}',
+        '#paper-outline-reader .po-toolbar{display:flex;flex-wrap:wrap;gap:6px;margin:2px 2px 12px;}',
+        '#paper-outline-reader .po-tbtn{display:inline-flex;align-items:center;gap:4px;font-size:11.5px;padding:3px 10px;border-radius:14px;border:1px solid var(--fill-quarternary,#d4d4d4);background:var(--fill-quinary,rgba(0,0,0,.035));color:var(--fill-secondary,#555);cursor:pointer;user-select:none;transition:background .12s,color .12s,border-color .12s;}',
+        '#paper-outline-reader .po-tbtn:hover,#paper-outline-reader .po-tbtn.po-tbtn-active{background:var(--accent-blue,#2e7dd1);border-color:var(--accent-blue,#2e7dd1);color:#fff;}',
         '#paper-outline-reader .po-tbtn:active{transform:translateY(1px);}',
-        '#paper-outline-reader .po-item{display:flex;align-items:baseline;gap:4px;padding:3px 6px;border-radius:6px;cursor:pointer;}',
+        '#paper-outline-reader .po-item{display:flex;flex-direction:column;padding:3px 6px;border-radius:6px;cursor:pointer;}',
         '#paper-outline-reader .po-item:hover{background:var(--fill-quinary,rgba(43,125,209,.12));}',
+        '#paper-outline-reader .po-item-head{display:flex;align-items:baseline;gap:4px;}',
         '#paper-outline-reader .po-toggle{flex:none;width:14px;text-align:center;font-size:10px;color:var(--fill-secondary,#999);cursor:pointer;}',
         '#paper-outline-reader .po-toggle.po-leaf{cursor:default;color:transparent;}',
         '#paper-outline-reader .po-text{flex:1 1 auto;overflow-wrap:anywhere;word-break:break-word;}',
+        '#paper-outline-reader .po-summary{margin:2px 0 2px 18px;font-size:11.5px;font-weight:400;line-height:1.5;color:var(--fill-secondary,#666);overflow-wrap:anywhere;}',
+        '#paper-outline-reader:not(.po-show-summaries) .po-summary{display:none;}',
         '#paper-outline-reader .po-active{background:var(--color-accent,#2e7dd1);}',
         '#paper-outline-reader .po-active .po-text{color:#fff;}',
+        '#paper-outline-reader .po-active .po-summary{color:rgba(255,255,255,.88);}',
         '#paper-outline-reader .po-lv1{font-weight:600;font-size:13.5px;margin-top:6px;}',
         '#paper-outline-reader .po-lv2{font-weight:500;}',
         '#paper-outline-reader .po-lv3,#paper-outline-reader .po-lv4,#paper-outline-reader .po-lv5,#paper-outline-reader .po-lv6{font-weight:400;color:var(--fill-secondary,#666);font-size:12.5px;}',
@@ -946,7 +1273,7 @@ var PaperOutline = {
         '#paper-outline-reader .po-btn:hover{background:var(--fill-quinary,rgba(43,125,209,.12));}',
         '#paper-outline-reader .po-spin-wrap{display:flex;flex-direction:column;align-items:center;gap:10px;padding:26px 0;color:var(--fill-secondary,#777);font-size:12px;}',
         '#paper-outline-reader .po-spin{width:24px;height:24px;border:3px solid var(--fill-quinary,#ddd);border-top-color:var(--accent-blue,#2e7dd1);border-radius:50%;animation:po-rot .8s linear infinite;}',
-        '@media (prefers-color-scheme:dark){#paper-outline-reader .po-status-testing{color:#f0c15a;}#paper-outline-reader .po-status-success{color:#70d68a;}#paper-outline-reader .po-status-error{color:#ff9292;}}',
+        '@media (prefers-color-scheme:dark){#paper-outline-reader .po-status-testing{color:#f0c15a;}#paper-outline-reader .po-status-success{color:#70d68a;}#paper-outline-reader .po-status-error,#paper-outline-reader .po-error-msg{color:#ff9292;}}',
         '@keyframes po-rot{to{transform:rotate(360deg);}}',
       ].join("\n");
       (doc.head || doc.documentElement).appendChild(st);
@@ -974,33 +1301,32 @@ var PaperOutline = {
     } catch (e) {}
   },
 
-  // 点击目录项跳转：①Zotero reader 官方 navigate（最稳）②书签 dest 精确定位 ③pdf.js 翻页 ④文本查找
+  // 点击目录项跳转：①书签 dest 精确定位 ②Zotero reader 官方 navigate（兼容 Zotero 7–10）③pdf.js 翻页 ④文本查找
   async _readerJump(reader, s) {
     try {
       const pg = parseInt(s.page, 10);
       const app = this._getReaderApp(reader); // 已是 wrappedJSObject 原生对象
       this.log("jump page=" + pg + " app=" + !!app + " title=" + (s.title || "").slice(0, 20));
 
-      if (app) {
-        // ① PDF 自带书签的精确目标（含页内 y 坐标）
-        if (s.dest && app.pdfLinkService && app.pdfLinkService.goToDestination) {
-          try { app.pdfLinkService.goToDestination(s.dest); return; } catch (e) {}
-        }
-        // ② 原生 pdf.js 翻页（currentPageNumber 为 1 基；app 已脱 Xray，可写）
-        if (pg && pg > 0) {
-          try { app.pdfViewer.currentPageNumber = pg; this.log("jumped via currentPageNumber"); return; } catch (e) { this.log("currentPageNumber: " + e); }
-          try { app.page = pg; this.log("jumped via app.page"); return; } catch (e) {}
-          try { app.pdfViewer.scrollPageIntoView({ pageNumber: pg }); this.log("jumped via scrollPageIntoView"); return; } catch (e) {}
-        }
+      // ① PDF 自带书签的精确目标（含页内 y 坐标）
+      if (app && s.dest && app.pdfLinkService && app.pdfLinkService.goToDestination) {
+        try { app.pdfLinkService.goToDestination(s.dest); return; } catch (e) {}
       }
-      // ③ Zotero reader 官方导航兜底（0 基 pageIndex）
+      // ② Zotero reader 官方导航优先（0 基 pageIndex，避免依赖内部属性）
       if (pg && pg > 0 && reader && typeof reader.navigate === "function") {
         try { await reader.navigate({ pageIndex: pg - 1 }); this.log("jumped via reader.navigate"); return; } catch (e) { this.log("reader.navigate: " + e); }
       }
-      // ④ 末路：按标题文本查找（仅文字层可读时有效）
-      if (app && app.eventBus && s.title) {
+      // ③ 原生 pdf.js 翻页兜底（currentPageNumber 为 1 基；app 已脱 Xray，可写）
+      if (app && pg && pg > 0) {
+        try { app.pdfViewer.currentPageNumber = pg; this.log("jumped via currentPageNumber"); return; } catch (e) { this.log("currentPageNumber: " + e); }
+        try { app.page = pg; this.log("jumped via app.page"); return; } catch (e) {}
+        try { app.pdfViewer.scrollPageIntoView({ pageNumber: pg }); this.log("jumped via scrollPageIntoView"); return; } catch (e) {}
+      }
+      // ④ 末路：按原文标题文本查找（优先 rawTitle，仅文字层可读时有效）
+      const query = String(s.rawTitle || s.title || "").slice(0, 40);
+      if (app && app.eventBus && query) {
         app.eventBus.dispatch("find", {
-          source: null, type: "", query: String(s.title).slice(0, 40),
+          source: null, type: "", query,
           caseSensitive: false, entireWord: false, highlightAll: true, findPrevious: false,
         });
       }
@@ -1009,13 +1335,39 @@ var PaperOutline = {
     }
   },
 
+  // 从当前选中条目解析常规文献条目（支持直接右键子 PDF 附件或标注回溯父条目）
+  _selectedRegularItems(pane) {
+    const raw = pane ? pane.getSelectedItems() : [];
+    const out = [];
+    const seen = new Set();
+    for (const it of raw || []) {
+      if (!it) continue;
+      let target = null;
+      if (it.isRegularItem && it.isRegularItem()) {
+        target = it;
+      } else if (
+        (it.isAttachment && it.isAttachment()) ||
+        (it.isAnnotation && it.isAnnotation())
+      ) {
+        let p = it.parentItem || (it.parentItemID && Zotero.Items && Zotero.Items.get(it.parentItemID));
+        if (p && p.isAttachment && p.isAttachment()) {
+          p = p.parentItem || (p.parentItemID && Zotero.Items && Zotero.Items.get(p.parentItemID));
+        }
+        if (p && p.isRegularItem && p.isRegularItem()) target = p;
+      }
+      if (target && !seen.has(target.id)) {
+        seen.add(target.id);
+        out.push(target);
+      }
+    }
+    return out;
+  },
+
   // ── 入口：处理当前选中条目 ──────────────────────────────
   async runOnSelected() {
     const pane = Zotero.getActiveZoteroPane();
     const win = Zotero.getMainWindow();
-    const items = (pane ? pane.getSelectedItems() : []).filter((i) =>
-      i.isRegularItem()
-    );
+    const items = this._selectedRegularItems(pane);
     if (!items.length) {
       if (win) win.alert("请先选中至少一篇文献条目。");
       return;
@@ -1068,7 +1420,7 @@ var PaperOutline = {
     return outline;
   },
 
-  // ── 核心：取全文 → 分块并发调 AI → 合并目录（菜单/面板共用）──
+  // ── 核心：取全文 → 长上下文单次/超长分块并发调 AI → 合并目录（菜单/面板共用）──
   async generateOutline(item, onText, opts) {
     opts = opts || {};
     // opts.pagedText：带「===== 第 N 页 =====」标记的全文（阅读器面板传入，用于让 AI 标页码）
@@ -1085,6 +1437,7 @@ var PaperOutline = {
         onText,
       });
       if (bundle.pages && bundle.pages.length) {
+        opts.resolvedPages = bundle.pages;
         opts.pagedText = bundle.pages
           .map((text, index) => "\n\n===== 第 " + (index + 1) + " 页 =====\n" + text)
           .join("");
@@ -1097,6 +1450,10 @@ var PaperOutline = {
       throw new Error("没有识别出可用的论文文字。");
     }
 
+    if (this.pref("trimReferences", true) !== false) {
+      fullText = this._stripReferencesForAI(fullText);
+    }
+
     // 系统提示：带页码标记时追加“标出每节起始页”的要求；并按设置控制识别层级深度
     let sys = this.pref("prompt", this.DEFAULT_PROMPT);
     if (opts.pagedText) sys += "\n\n" + this.PAGE_INSTRUCTION;
@@ -1106,18 +1463,40 @@ var PaperOutline = {
         ? "\n\n只需识别到第 " + maxLevel + " 级标题（level 不超过 " + maxLevel + "）。"
         : "\n\n请尽量识别完整的层级结构，包含 (一)(二)(三)、1. 2.、(1)(2) 等各级小标题。";
 
-    const maxChars = parseInt(this.pref("maxCharsPerChunk", 40000), 10) || 40000;
-    const chunks = this._splitText(fullText, maxChars);
+    // 先完成一次模型发现，避免并发分块多次请求 /models
+    const config = opts.config || (await this._prepareAI());
+
+    // 长上下文免切块：模型可用上下文足以覆盖全文且 <= 240,000 字时单次出目录，消除分块割裂
+    let chunks;
+    const ctxTokens = this._contextWindowTokens(config);
+    let singleShotLimit = 0;
+    if (ctxTokens > 0) {
+      try {
+        singleShotLimit = this._summaryInputLimit(config, sys, "论文全文：\n\n");
+      } catch (e) {}
+    }
+    if (singleShotLimit > fullText.length && fullText.length <= 240000) {
+      chunks = [fullText];
+    } else {
+      const maxChars = parseInt(this.pref("maxCharsPerChunk", 40000), 10) || 40000;
+      chunks = this._splitText(fullText, maxChars);
+    }
     const concurrency = parseInt(this.pref("concurrency", 5), 10) || 5;
 
-    if (onText) onText(`AI 分析中（${chunks.length} 块 / 并发 ${concurrency}）…`);
+    if (onText) {
+      onText(
+        chunks.length === 1
+          ? "AI 分析全文目录中…"
+          : `AI 分析中（${chunks.length} 块 / 并发 ${concurrency}）…`
+      );
+    }
 
     const partResults = await this._pool(chunks, concurrency, async (chunk, idx) => {
       const userMsg =
         chunks.length > 1
           ? `这是论文的第 ${idx + 1}/${chunks.length} 部分，请只就这部分输出目录条目：\n\n${chunk}`
           : `论文全文：\n\n${chunk}`;
-      const raw = await this.callAI(sys, userMsg, { task: "outline" });
+      const raw = await this.callAI(sys, userMsg, { task: "outline", config });
       return this._parseOutline(raw);
     });
 
@@ -1195,15 +1574,19 @@ var PaperOutline = {
       }
     }
     // 用 Zotero PDFWorker 抽每页文本（CID-aware，知网/扫描双层也能读）；带页码标记喂 AI，
-    // 之后再用每页文本把标题精确定位到页（见 _fillPages）。worker 失败则回退 attachmentText。
-    const att = (reader && reader._item) || (await this._resolveAttachment(item));
+    // 之后再用每页文本把标题精确定位到页（见 _fillPages）。扫描件经 MinerU 解析后也会回传 pages。
+    const att = this._getReaderAttachment(reader) || (await this._resolveAttachment(item));
     let pages = null;
     try { pages = await this._getWorkerPages(att); } catch (e) { this.log("workerPages: " + e); }
-    if (pages && !this._hasReadablePdfText(pages.join("\n"))) pages = null;
+    if (pages && !this._hasReadablePdfText(pages.join("\n"), pages.length)) pages = null;
     const pagedText =
       pages && pages.length ? pages.map((t, i) => `\n\n===== 第 ${i + 1} 页 =====\n` + t).join("") : null;
     this.log("generateReaderOutline workerPages=" + (pages ? pages.length : "无"));
-    const outline = await this.generateOutline(item, onText, { pagedText, att });
+    const outlineOpts = { pagedText, att };
+    const outline = await this.generateOutline(item, onText, outlineOpts);
+    if (!pages && outlineOpts.resolvedPages && outlineOpts.resolvedPages.length) {
+      pages = outlineOpts.resolvedPages;
+    }
     if (outline && outline.length) {
       try {
         await this._fillPages(item, reader, outline, pages);
@@ -1229,40 +1612,67 @@ var PaperOutline = {
     }
   },
 
+  // 提取目录条目的页码匹配探针（优先 rawTitle 兼顾英文论文，再尝试 title 及去编号版本）
+  _titleProbes(entry) {
+    const norm = (s) => String(s || "").toLowerCase().replace(/\s+/g, "");
+    const stripNum = (s) =>
+      String(s || "")
+        .replace(
+          /^\s*(?:第[一二三四五六七八九十百千0-9]+[章节编部篇]\s*|[（(][一二三四五六七八九十0-9]+[）)]\s*|[一二三四五六七八九十]+[、.．]\s*|(?:section|chapter|part)\s+[0-9ivx]+[:.\s-]+|[ivx]+[.、．)]\s*|\d+(?:\.\d+)*[.、．)]?\s+)/i,
+          ""
+        )
+        .trim();
+    const probes = [];
+    const seen = new Set();
+    const add = (raw) => {
+      const k = norm(raw);
+      if (k.length < 2) return;
+      for (const candidate of [k.slice(0, Math.min(24, k.length)), k.slice(0, Math.min(14, k.length))]) {
+        if (candidate.length >= 2 && !seen.has(candidate)) {
+          seen.add(candidate);
+          probes.push(candidate);
+        }
+      }
+    };
+    if (entry && entry.rawTitle) {
+      add(entry.rawTitle);
+      add(stripNum(entry.rawTitle));
+    }
+    if (entry && entry.title) {
+      add(entry.title);
+      add(stripNum(entry.title));
+    }
+    return probes;
+  },
+
   // 识别论文前部的印刷“目录/目次”页。此类页面会密集重复后文标题，
   // 如果按“第一次出现”定位，几乎所有章节都会被错误映射到首页。
   _detectPrintedContentsPages(pages, outline) {
-    const norm = (s) => String(s || "").replace(/\s+/g, "");
-    const probes = [];
-    const seen = new Set();
+    const norm = (s) => String(s || "").toLowerCase().replace(/\s+/g, "");
+    const probeGroups = [];
     for (const s of outline || []) {
-      const key = norm(s && s.title);
-      if (key.length < 2) continue;
-      const probe = key.slice(0, Math.min(18, key.length));
-      if (!seen.has(probe)) {
-        seen.add(probe);
-        probes.push(probe);
-      }
+      const probes = this._titleProbes(s);
+      if (probes.length) probeGroups.push(probes);
     }
     const detected = new Set();
-    if (!pages || !pages.length || probes.length < 2) return detected;
+    if (!pages || !pages.length || probeGroups.length < 2) return detected;
 
     // 只检查文档前部，最多 12 页；正文中的章节回顾不会被误判成前置目录。
     const frontLimit = Math.min(
       pages.length,
       Math.min(12, Math.max(6, Math.ceil(pages.length * 0.2)))
     );
-    const denseThreshold = Math.max(4, Math.min(8, Math.ceil(probes.length * 0.35)));
+    const denseThreshold = Math.max(4, Math.min(8, Math.ceil(probeGroups.length * 0.35)));
     let previousWasContents = false;
     for (let i = 0; i < frontLimit; i++) {
       const raw = String(pages[i] || "");
       const page = norm(raw);
       let matches = 0;
-      for (const probe of probes) {
-        if (page.includes(probe)) matches++;
+      for (const probes of probeGroups) {
+        if (probes.some((probe) => page.includes(probe))) matches++;
       }
       const hasContentsHeading =
-        /(?:^|[\r\n])\s*(?:目\s*录|目\s*次|contents)\s*(?:[\r\n]|$)/im.test(raw);
+        /(?:^|[\r\n])\s*(?:目\s*录|目\s*次|table\s+of\s+contents|contents)\s*(?:[\r\n]|$)/im.test(raw);
       const isContents =
         (hasContentsHeading && matches >= 2) ||
         matches >= denseThreshold ||
@@ -1276,7 +1686,7 @@ var PaperOutline = {
   async _repairCachedOutlinePages(item, reader, doc) {
     const cached = item && this._getCache(item.key);
     if (!cached || cached.length < 2) return false;
-    const att = (reader && reader._item) || (await this._resolveAttachment(item));
+    const att = this._getReaderAttachment(reader) || (await this._resolveAttachment(item));
     const pages = await this._getWorkerPages(att);
     if (!pages || pages.length < 2) return false;
     const contentsPages = this._detectPrintedContentsPages(pages, cached);
@@ -1301,13 +1711,13 @@ var PaperOutline = {
     return true;
   },
 
-  // 给每个条目补页码：① 有 worker 每页文本 → 逐页精确定位标题（精确到页）；
+  // 给每个条目补页码：① 有 worker/MinerU 每页文本 → 逐页精确定位标题（优先 rawTitle 兼容英文论文）；
   // ② 拿不到则按字符偏移比例估算；③ 单调非递减 + 继承，保证每一级（含子标题）都有页码。
   async _fillPages(item, reader, outline, pages) {
-    const norm = (s) => String(s || "").replace(/\s+/g, "");
+    const norm = (s) => String(s || "").toLowerCase().replace(/\s+/g, "");
     if (!pages) {
       try {
-        const att = (reader && reader._item) || (await this._resolveAttachment(item));
+        const att = this._getReaderAttachment(reader) || (await this._resolveAttachment(item));
         pages = await this._getWorkerPages(att);
       } catch (e) {}
     }
@@ -1323,16 +1733,21 @@ var PaperOutline = {
       let cursor = bodyStart,
         hit = 0;
       for (const s of outline) {
-        const key = norm(s.title);
-        if (key.length < 2) continue;
-        const probe = key.slice(0, Math.min(18, key.length));
+        const probes = this._titleProbes(s);
+        if (!probes.length) continue;
         let found = -1;
-        for (let i = cursor; i < np.length; i++) {
-          if (!contentsPages.has(i) && np[i].includes(probe)) { found = i; break; }
+        for (const probe of probes) {
+          for (let i = cursor; i < np.length; i++) {
+            if (!contentsPages.has(i) && np[i].includes(probe)) { found = i; break; }
+          }
+          if (found >= 0) break;
         }
         if (found < 0) {
-          for (let i = bodyStart; i < np.length; i++) {
-            if (!contentsPages.has(i) && np[i].includes(probe)) { found = i; break; }
+          for (const probe of probes) {
+            for (let i = bodyStart; i < np.length; i++) {
+              if (!contentsPages.has(i) && np[i].includes(probe)) { found = i; break; }
+            }
+            if (found >= 0) break;
           }
         }
         if (found >= 0) {
@@ -1350,7 +1765,7 @@ var PaperOutline = {
       // —— 退化：worker 取不到（极少数）→ 按 attachmentText 字符偏移比例估算缺失的 ——
       let body = "";
       try {
-        const att = (reader && reader._item) || (await item.getBestAttachment());
+        const att = this._getReaderAttachment(reader) || (await item.getBestAttachment());
         body = norm((att && (await att.attachmentText)) || "");
       } catch (e) {}
       const app = this._getReaderApp(reader);
@@ -1359,9 +1774,9 @@ var PaperOutline = {
         let from = 0;
         for (const s of outline) {
           if (parseInt(s.page, 10) > 0) continue;
-          const key = norm(s.title);
+          const probes = this._titleProbes(s);
           let idx = -1;
-          for (const k of [key, key.slice(0, 12), key.slice(0, 6)]) {
+          for (const k of probes) {
             if (k.length < 2) continue;
             idx = body.indexOf(k, from);
             if (idx < 0) idx = body.indexOf(k);
@@ -1434,7 +1849,7 @@ var PaperOutline = {
   },
 
   // ── 目录缓存（按 item.key 存进 Zotero 数据目录下的独立 JSON 文件，不再塞进偏好）──────
-  // 内存里维护一份 _cache，读写都走它（同步接口不变）；写时异步落盘。
+  // 内存里维护一份 _cache，读写都走它（同步接口不变）；写时串行原子落盘。
   _cache: {},
   _cacheLoaded: false,
 
@@ -1446,16 +1861,30 @@ var PaperOutline = {
     }
   },
 
-  // 启动时调用一次：从 JSON 文件载入；文件不存在则尝试从旧 prefs 缓存迁移过来。
+  // 启动时调用一次：从 JSON 文件载入；文件损坏则备份 .bak 后回退空对象；不存在则尝试从旧 prefs 迁移。
   async _loadCache() {
     try {
       const p = this._cachePath();
       if (p && (await IOUtils.exists(p))) {
-        this._cache = JSON.parse(await IOUtils.readUTF8(p)) || {};
+        const raw = await IOUtils.readUTF8(p);
+        try {
+          const parsed = JSON.parse(raw);
+          this._cache = parsed && typeof parsed === "object" ? parsed : {};
+        } catch (parseErr) {
+          this.log("loadCache JSON 损坏，备份后重置: " + parseErr);
+          try {
+            if (typeof IOUtils.copy === "function") await IOUtils.copy(p, p + ".bak");
+          } catch (bakErr) {}
+          this._cache = {};
+        }
       } else {
         const old = Zotero.Prefs.get("extensions.paperoutline.cache", true);
         if (old) {
-          this._cache = JSON.parse(old) || {};
+          try {
+            this._cache = JSON.parse(old) || {};
+          } catch (e) {
+            this._cache = {};
+          }
           await this._saveCacheFile();
           try { Zotero.Prefs.clear("extensions.paperoutline.cache", true); } catch (e) {}
           this.log("缓存已从 prefs 迁移到 " + p);
@@ -1467,13 +1896,19 @@ var PaperOutline = {
     this._cacheLoaded = true;
   },
 
-  async _saveCacheFile() {
-    try {
-      const p = this._cachePath();
-      if (p) await IOUtils.writeUTF8(p, JSON.stringify(this._cache));
-    } catch (e) {
-      this.log("saveCacheFile: " + e);
-    }
+  _saveCacheFile() {
+    const run = async () => {
+      try {
+        const p = this._cachePath();
+        if (!p) return;
+        const data = JSON.stringify(this._cache || {});
+        await IOUtils.writeUTF8(p, data, { tmpPath: p + ".tmp" });
+      } catch (e) {
+        this.log("saveCacheFile: " + e);
+      }
+    };
+    this._cacheSaveChain = (this._cacheSaveChain || Promise.resolve()).then(run, run);
+    return this._cacheSaveChain;
   },
 
   _getCache(key) {
@@ -1512,13 +1947,18 @@ var PaperOutline = {
     }
   },
 
+  _escapeHtml(s) {
+    return String(s || "")
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;")
+      .replace(/"/g, "&quot;")
+      .replace(/'/g, "&#39;");
+  },
+
   // ── 拼装笔记 HTML（按 level 缩进）───────────────────────
   _renderNote(title, outline) {
-    const esc = (s) =>
-      String(s || "")
-        .replace(/&/g, "&amp;")
-        .replace(/</g, "&lt;")
-        .replace(/>/g, "&gt;");
+    const esc = (s) => this._escapeHtml(s);
     const rows = outline
       .map((s) => {
         const lv = Math.max(1, Math.min(6, parseInt(s.level, 10) || 1));
@@ -1537,37 +1977,34 @@ var PaperOutline = {
     );
   },
 
-  // ── AI 服务商预设（全部走 OpenAI 兼容 /chat/completions；Ollama 用其 /v1 兼容端点）──
+  // ── AI 服务商预设（国内主力 + 本地 Ollama + 自定义；全部走 OpenAI 兼容 /chat/completions）──
   // 选定服务商即用其默认 URL/模型；用户在设置里填的 apiUrl/model 非空则覆盖（自定义服务商必填）。
   PROVIDERS: {
-    deepseek:    { label: "DeepSeek（默认）",          url: "https://api.deepseek.com/chat/completions",                          model: "deepseek-v4-flash",       json: true,  supportsThinking: true },
-    openai:      { label: "OpenAI",                     url: "https://api.openai.com/v1/chat/completions",                         model: "gpt-4o-mini",             json: true },
-    mimo:        { label: "Xiaomi MiMo",                url: "https://api.xiaomimimo.com/v1/chat/completions",                    model: "mimo-v2.5",               json: true,  supportsThinking: true, contextTokens: 1048576, completionTokensParam: "max_completion_tokens" },
-    moonshot:    { label: "月之暗面 Kimi",              url: "https://api.moonshot.cn/v1/chat/completions",                        model: "moonshot-v1-8k",          json: true },
-    zhipu:       { label: "智谱 GLM",                   url: "https://open.bigmodel.cn/api/paas/v4/chat/completions",              model: "glm-4-flash",             json: true },
-    qwen:        { label: "通义千问 Qwen",              url: "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions", model: "qwen-plus",               json: true },
-    siliconflow: { label: "硅基流动 SiliconFlow",       url: "https://api.siliconflow.cn/v1/chat/completions",                     model: "deepseek-ai/DeepSeek-V3", json: true },
-    ollama:      { label: "本地 Ollama",                url: "http://localhost:11434/v1/chat/completions",                         model: "qwen2.5",                 json: false },
-    custom:      { label: "自定义（手填 URL / 模型）",   url: "",                                                                   model: "",                        json: false },
+    deepseek:    { label: "DeepSeek（默认）",        url: "https://api.deepseek.com/chat/completions",                          model: "deepseek-flash",          json: true,  supportsThinking: true,  thinkingStyle: "thinking_object", contextTokens: 1048576 },
+    mimo:        { label: "Xiaomi MiMo",             url: "https://api.xiaomimimo.com/v1/chat/completions",                     model: "mimo-v2.6-flash",         json: true,  supportsThinking: true,  thinkingStyle: "thinking_object", contextTokens: 1048576, completionTokensParam: "max_completion_tokens" },
+    moonshot:    { label: "月之暗面 Kimi",           url: "https://api.moonshot.cn/v1/chat/completions",                        model: "kimi-k2.6",               json: true,  supportsThinking: true,  thinkingStyle: "reasoning_effort", contextTokens: 262144 },
+    zhipu:       { label: "智谱 GLM",                url: "https://open.bigmodel.cn/api/paas/v4/chat/completions",              model: "glm-4.7-flash",           json: true,  supportsThinking: true,  thinkingStyle: "thinking_object", contextTokens: 200000 },
+    qwen:        { label: "通义千问 Qwen",           url: "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions", model: "qwen-plus",               json: true,  supportsThinking: true,  thinkingStyle: "enable_thinking", contextTokens: 1000000 },
+    siliconflow: { label: "硅基流动 SiliconFlow",    url: "https://api.siliconflow.cn/v1/chat/completions",                     model: "deepseek-ai/DeepSeek-V3.2", json: true, supportsThinking: false, thinkingStyle: "none",           contextTokens: 128000 },
+    ollama:      { label: "本地 Ollama",             url: "http://localhost:11434/v1/chat/completions",                         model: "qwen3",                   json: true,  supportsThinking: false, thinkingStyle: "none" },
+    custom:      { label: "自定义（手填 URL / 模型）", url: "",                                                                  model: "",                        json: false, supportsThinking: false, thinkingStyle: "none" },
   },
 
-  MODEL_PREFERENCES: {
-    deepseek:    [/flash/i, /chat/i, /deepseek/i, /pro/i],
-    openai:      [/^gpt-4o-mini$/i, /^gpt-4\.1-mini$/i, /^gpt-4o$/i, /^gpt-4\.1$/i, /^gpt-/i],
-    mimo:        [/^mimo-v2\.5$/i, /^mimo-v2\.5-pro$/i],
-    moonshot:    [/moonshot.*8k/i, /moonshot/i, /kimi/i],
-    zhipu:       [/glm-4-flash/i, /glm-4/i, /glm/i],
-    qwen:        [/qwen-plus/i, /qwen.*turbo/i, /qwen/i],
-    siliconflow: [/deepseek.*v3/i, /deepseek/i, /qwen/i],
-    ollama:      [/qwen/i, /llama/i, /mistral/i],
-    custom:      [],
-  },
+  NON_CHAT_MODEL_RE:
+    /(embedding|embed|rerank|bge|whisper|speech|tts|asr|voice|audio|moderation|image|dall-e|video|flux|ocr|realtime|transcribe|codex|guard|shield)/i,
 
-  // /models 只返回模型 ID，不返回上下文窗口；这里仅维护确认过的模型元数据。
+  // 家族级上下文窗口规则（不锁死小版本号）；/models 返回的元数据优先级更高。
   MODEL_CONTEXT_WINDOWS: [
-    { pattern: /^mimo-v2\.5(?:-pro)?$/i, tokens: 1048576 },
-    { pattern: /^gpt-4o(?:-mini)?(?:-|$)/i, tokens: 128000 },
-    { pattern: /^moonshot-v1-8k$/i, tokens: 8192 },
+    { pattern: /^mimo-v\d/i, tokens: 1048576 },
+    { pattern: /^deepseek(?:[-_]|$)/i, tokens: 1048576 },
+    { pattern: /^kimi-k3/i, tokens: 1048576 },
+    { pattern: /^kimi-k2/i, tokens: 262144 },
+    { pattern: /^moonshot-v1-128k/i, tokens: 128000 },
+    { pattern: /^moonshot-v1-32k/i, tokens: 32768 },
+    { pattern: /^moonshot-v1-8k/i, tokens: 8192 },
+    { pattern: /^glm-(?:4\.[5-9]|[5-9])/i, tokens: 200000 },
+    { pattern: /^glm-4/i, tokens: 128000 },
+    { pattern: /^qwen(?:[-_].*(?:plus|flash|long|turbo|max)|[3-9])/i, tokens: 1000000 },
   ],
 
   _resolveAI(overrides) {
@@ -1593,6 +2030,7 @@ var PaperOutline = {
       key,
       json: preset.json,
       supportsThinking: !!preset.supportsThinking,
+      thinkingStyle: preset.thinkingStyle || (preset.supportsThinking ? "thinking_object" : "none"),
       contextTokens: preset.contextTokens || 0,
       completionTokensParam: preset.completionTokensParam || "max_tokens",
       defaultModel: preset.model,
@@ -1602,24 +2040,27 @@ var PaperOutline = {
 
   _contextWindowTokens(config) {
     const model = String((config && config.model) || "").trim();
+    if (model && this._modelMetaCache && this._modelMetaCache.has(model.toLowerCase())) {
+      const meta = this._modelMetaCache.get(model.toLowerCase());
+      if (meta && meta.contextTokens > 0) return meta.contextTokens;
+    }
     for (const meta of this.MODEL_CONTEXT_WINDOWS) {
       if (meta.pattern.test(model)) return meta.tokens;
     }
-    if (
-      config &&
-      !config.modelIsCustom &&
-      model &&
-      model === config.defaultModel &&
-      config.contextTokens
-    ) {
+    if (config && !config.modelIsCustom && config.contextTokens) {
       return config.contextTokens;
     }
     return 0;
   },
 
-  // 不引入 tokenizer 依赖，按「1 个字符至少占 1 token」保守估算，对中文和混合文本更安全。
+  // 中英加权 token 估算：中文字符按 1.15 token、其他字符按 0.35 token 估算，空串返回 0。
   _estimatePromptTokens(text) {
-    return String(text || "").length;
+    const s = String(text || "");
+    if (!s) return 0;
+    const cjk = s.match(/[\u2e80-\u2eff\u3000-\u303f\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff\uff00-\uffef]/g);
+    const cjkCount = cjk ? cjk.length : 0;
+    const otherCount = s.length - cjkCount;
+    return Math.ceil(cjkCount * 1.15 + otherCount * 0.35);
   },
 
   _summaryInputLimit(config, systemPrompt, fixedUserText) {
@@ -1637,15 +2078,90 @@ var PaperOutline = {
     if (available <= 0) {
       throw new Error("总结提示词过长，已超出当前模型可用上下文；请缩短总结提示词或更换长上下文模型。");
     }
-    return available;
+    return Math.max(1, Math.floor(available / 1.15));
   },
 
   _applyThinkingPreference(payload, config, task) {
     if (!payload || !config || !config.supportsThinking) return;
-    if (task !== "summary" && task !== "outline") return;
-    payload.thinking = {
-      type: this.pref("deepThinking", false) === true ? "enabled" : "disabled",
-    };
+    const style = config.thinkingStyle || "thinking_object";
+    if (style === "none") return;
+    if (task !== "summary" && task !== "outline" && task !== "test") return;
+    const enabled = task === "test" ? false : this.pref("deepThinking", false) === true;
+    if (style === "thinking_object") {
+      payload.thinking = { type: enabled ? "enabled" : "disabled" };
+    } else if (style === "enable_thinking") {
+      payload.enable_thinking = !!enabled;
+    } else if (style === "reasoning_effort") {
+      payload.reasoning_effort = enabled ? "high" : "low";
+    }
+  },
+
+  _applyTemperature(payload, config, temperature) {
+    if (!payload || typeof temperature !== "number") return;
+    const model = String((config && config.model) || payload.model || "").trim();
+    // 部分推理模型（如 kimi-k3 / o1 / o3 / o4）拒绝自定义 temperature
+    if (/^(?:kimi-k3|o[134](?:[-_]|$))/i.test(model)) return;
+    payload.temperature = temperature;
+  },
+
+  _stripThinkingTags(text) {
+    const s = String(text || "");
+    if (!s) return "";
+    return s.replace(/^\s*(?:<think>[\s\S]*?<\/think>\s*)+/i, "");
+  },
+
+  _shortHash(str) {
+    const s = String(str || "");
+    let h = 2166136261;
+    for (let i = 0; i < s.length; i++) {
+      h ^= s.charCodeAt(i);
+      h = Math.imul(h, 16777619);
+    }
+    return (h >>> 0).toString(16).padStart(8, "0");
+  },
+
+  _validateUrl(rawUrl, opts) {
+    opts = opts || {};
+    const raw = String(rawUrl || "").trim();
+    if (!raw) throw new Error("请求地址为空。");
+    let protocol = "";
+    let hostname = "";
+    if (typeof URL === "function") {
+      try {
+        const parsed = new URL(raw);
+        protocol = String(parsed.protocol || "").toLowerCase();
+        hostname = String(parsed.hostname || "").toLowerCase();
+      } catch (e) {
+        throw new Error("无效的接口地址：" + raw.slice(0, 80));
+      }
+    } else {
+      const m = raw.match(/^(https?):\/\/(\[[^\]]+\]|[^/:?#]+)/i);
+      if (!m) throw new Error("无效的接口地址：" + raw.slice(0, 80));
+      protocol = m[1].toLowerCase() + ":";
+      hostname = m[2].toLowerCase();
+    }
+    if (protocol === "https:") return raw;
+    const isLoopback =
+      hostname === "localhost" ||
+      hostname === "127.0.0.1" ||
+      hostname === "::1" ||
+      hostname === "[::1]";
+    if (protocol === "http:" && opts.allowLocalHttp && isLoopback) {
+      return raw;
+    }
+    throw new Error(
+      opts.allowLocalHttp
+        ? "出于安全考虑，仅支持 https:// 地址（本地回环 localhost / 127.0.0.1 除外）。"
+        : "出于安全考虑，该请求仅支持 https:// 地址。"
+    );
+  },
+
+  _validateApiUrl(rawUrl) {
+    return this._validateUrl(rawUrl, { allowLocalHttp: true });
+  },
+
+  _validateHttpsUrl(rawUrl) {
+    return this._validateUrl(rawUrl, { allowLocalHttp: false });
   },
 
   _modelsURL(chatURL) {
@@ -1657,53 +2173,224 @@ var PaperOutline = {
     return "";
   },
 
+  // 从模型名解析语义版本号数组（如 mimo-v2.6-flash → [2,6]、mimo-v3-flash → [3,0]、kimi-k3.1-pro → [3,1]）
+  _parseModelVersion(id) {
+    const s = String(id || "").trim();
+    if (!s) return [0, 0];
+    const base = s.includes("/") ? s.slice(s.lastIndexOf("/") + 1) : s;
+    const toArr = (verStr) => {
+      const parts = verStr.split(".").map((n) => parseInt(n, 10) || 0);
+      if (parts.length === 1) parts.push(0);
+      return parts;
+    };
+    let m = base.match(/(?:^|[-_])(?:v|k)(\d+(?:\.\d+)*)(?=$|[-_/:])/i);
+    if (m) return toArr(m[1]);
+    m = base.match(/(?:qwen|glm|llama|mistral|deepseek|mimo|kimi|moonshot|yi|gemma|phi)[-_]?(\d+(?:\.\d+)*)(?=$|[-_/:a-z])/i);
+    if (m && parseInt(m[1], 10) < 100) return toArr(m[1]);
+    const re = /(?:^|[-_])(\d+(?:\.\d+)*)(?=$|[-_/:])/g;
+    while ((m = re.exec(base)) !== null) {
+      const nextCh = base.charAt(m.index + m[0].length);
+      if (/[bkm]/i.test(nextCh)) continue;
+      const major = parseInt(m[1], 10);
+      if (major < 100) return toArr(m[1]);
+    }
+    return [0, 0];
+  },
+
+  _compareVersions(a, b) {
+    const len = Math.max(a.length, b.length);
+    for (let i = 0; i < len; i++) {
+      const av = a[i] || 0;
+      const bv = b[i] || 0;
+      if (av !== bv) return av - bv;
+    }
+    return 0;
+  },
+
+  _scoreModelCandidate(provider, id) {
+    const lower = String(id || "").toLowerCase();
+    const isVision = /(?:^|[-_/])(?:vl|vision|omni)(?:$|[-_/:])|\dv(?:$|[-_/:])/i.test(lower) ? -1 : 0;
+
+    let family = 1;
+    switch (provider) {
+      case "deepseek":
+        if (/^deepseek-flash$/i.test(lower)) family = 5;
+        else if (/deepseek.*flash/i.test(lower)) family = 4;
+        else if (/deepseek.*chat/i.test(lower)) family = 3;
+        else if (/deepseek/i.test(lower)) family = 2;
+        break;
+      case "mimo":
+        if (/^mimo-v\d/i.test(lower)) family = 4;
+        else if (/mimo/i.test(lower)) family = 3;
+        break;
+      case "moonshot":
+        if (/kimi-k/i.test(lower)) family = 4;
+        else if (/kimi/i.test(lower)) family = 3;
+        else if (/moonshot/i.test(lower)) family = 2;
+        break;
+      case "zhipu":
+        if (/glm.*flash/i.test(lower)) family = 4;
+        else if (/glm/i.test(lower)) family = 3;
+        break;
+      case "qwen":
+        if (/^qwen-flash$/i.test(lower)) family = 5;
+        else if (/^qwen-plus$/i.test(lower)) family = 4;
+        else if (/qwen/i.test(lower)) family = 3;
+        break;
+      case "siliconflow":
+        if (/deepseek/i.test(lower)) family = 4;
+        else if (/qwen/i.test(lower)) family = 3;
+        break;
+      case "ollama":
+        if (/qwen/i.test(lower)) family = 5;
+        else if (/deepseek/i.test(lower)) family = 4;
+        else if (/llama/i.test(lower)) family = 3;
+        else if (/mistral/i.test(lower)) family = 2;
+        break;
+      default:
+        family = 1;
+    }
+
+    const version = this._parseModelVersion(id);
+    const stability = /(?:^|[-_])(?:preview|exp|alpha|beta|ultraspeed|nightly|test|rc|distill|coder)(?:$|[-_])/i.test(lower)
+      ? -1
+      : 0;
+
+    let tier = 4; // standard
+    if (/(?:^|[-_])(?:flash|turbo|lite|mini|chat)(?:$|[-_])/i.test(lower)) tier = 5;
+    else if (/(?:^|[-_])plus(?:$|[-_])/i.test(lower)) tier = 3;
+    else if (/(?:^|[-_])pro(?:$|[-_])/i.test(lower)) tier = 2;
+    else if (/(?:^|[-_])(?:max|ultra|reasoner|thinking)(?:$|[-_])/i.test(lower)) tier = 1;
+
+    return { isVision, family, version, stability, tier, length: lower.length };
+  },
+
   _chooseAvailableModel(provider, ids, fallback) {
     const models = (ids || [])
       .map((id) => String(id || "").trim())
       .filter(Boolean);
     if (!models.length) return fallback || "";
-    if (fallback && models.includes(fallback)) return fallback;
 
-    const usable = models.filter((id) =>
-      !/(embedding|rerank|whisper|speech|tts|asr|voiceclone|voicedesign|moderation|image|dall-e)/i.test(id)
-    );
+    const usable = models.filter((id) => !this.NON_CHAT_MODEL_RE.test(id));
     const candidates = usable.length ? usable : models;
-    const preferences = this.MODEL_PREFERENCES[provider] || [];
-    for (const pattern of preferences) {
-      const match = candidates.find((id) => pattern.test(id));
-      if (match) return match;
+
+    const scored = candidates.map((id, index) => ({
+      id,
+      index,
+      score: this._scoreModelCandidate(provider, id),
+    }));
+    scored.sort((a, b) => {
+      if (a.score.isVision !== b.score.isVision) return b.score.isVision - a.score.isVision;
+      if (a.score.family !== b.score.family) return b.score.family - a.score.family;
+      const verCmp = this._compareVersions(b.score.version, a.score.version);
+      if (verCmp !== 0) return verCmp;
+      if (a.score.stability !== b.score.stability) return b.score.stability - a.score.stability;
+      if (a.score.tier !== b.score.tier) return b.score.tier - a.score.tier;
+      if (a.score.length !== b.score.length) return a.score.length - b.score.length;
+      return a.index - b.index;
+    });
+    return scored[0].id;
+  },
+
+  async listAvailableModels(overrides, force) {
+    const config = this._resolveAI(overrides);
+    const modelsURL = this._modelsURL(config.url);
+    if (!modelsURL) {
+      return {
+        models: [],
+        recommended: config.model || "",
+        provider: config.provider,
+        url: "",
+      };
     }
-    return candidates[0];
+    this._validateApiUrl(modelsURL);
+    this._modelListCache = this._modelListCache || new Map();
+    this._modelMetaCache = this._modelMetaCache || new Map();
+    const cacheKey = config.provider + "|" + modelsURL + "|" + this._shortHash(config.key);
+    if (!force && this._modelListCache.has(cacheKey)) {
+      const cached = this._modelListCache.get(cacheKey);
+      return {
+        models: cached.models.slice(),
+        recommended: cached.recommended,
+        provider: cached.provider,
+        url: cached.url,
+      };
+    }
+
+    const headers = {};
+    if (config.key) headers.Authorization = "Bearer " + config.key;
+    const xhr = await Zotero.HTTP.request("GET", modelsURL, {
+      headers,
+      responseType: "text",
+      timeout: 20000,
+    });
+    const result = JSON.parse(xhr.responseText);
+    const rawItems = Array.isArray(result && result.data)
+      ? result.data
+      : Array.isArray(result && result.models)
+        ? result.models
+        : [];
+    const seen = new Set();
+    const ids = [];
+    for (const item of rawItems) {
+      const id = String((item && (item.id || item.name)) || "").trim();
+      if (!id) continue;
+      if (!seen.has(id)) {
+        seen.add(id);
+        ids.push(id);
+      }
+      const ctx = parseInt(
+        item.context_length ||
+          item.max_model_len ||
+          item.context_window ||
+          item.input_token_limit ||
+          (item.limits && item.limits.context) ||
+          0,
+        10
+      );
+      if (ctx >= 1024) {
+        this._modelMetaCache.set(id.toLowerCase(), { contextTokens: ctx });
+      }
+    }
+    const usable = ids.filter((id) => !this.NON_CHAT_MODEL_RE.test(id));
+    const displayModels = usable.length ? usable : ids;
+    const recommended = this._chooseAvailableModel(
+      config.provider,
+      ids,
+      config.defaultModel || config.model
+    );
+    const entry = {
+      models: displayModels,
+      recommended,
+      provider: config.provider,
+      url: modelsURL,
+    };
+    this._modelListCache.set(cacheKey, entry);
+    return {
+      models: displayModels.slice(),
+      recommended,
+      provider: config.provider,
+      url: modelsURL,
+    };
   },
 
   async _discoverModel(config, force) {
-    if (!config || config.modelIsCustom) return config && config.model;
+    if (!config) return "";
+    if (config.modelIsCustom && !force) return config.model;
     const modelsURL = this._modelsURL(config.url);
     if (!modelsURL) return config.model;
 
-    this._modelDiscoveryCache = this._modelDiscoveryCache || new Map();
-    const cacheKey = config.provider + "|" + modelsURL;
-    if (!force && this._modelDiscoveryCache.has(cacheKey)) {
-      return this._modelDiscoveryCache.get(cacheKey);
-    }
-
     try {
-      const headers = {};
-      if (config.key) headers.Authorization = "Bearer " + config.key;
-      const xhr = await Zotero.HTTP.request("GET", modelsURL, {
-        headers,
-        responseType: "text",
-        timeout: 20000,
-      });
-      const result = JSON.parse(xhr.responseText);
-      const ids = Array.isArray(result.data)
-        ? result.data.map((item) => item && item.id).filter(Boolean)
-        : [];
-      const selected = this._chooseAvailableModel(config.provider, ids, config.model);
-      if (selected) {
-        this._modelDiscoveryCache.set(cacheKey, selected);
-        return selected;
-      }
+      const listed = await this.listAvailableModels(
+        {
+          provider: config.provider,
+          url: config.url,
+          key: config.key,
+          model: "",
+        },
+        !!force
+      );
+      if (listed && listed.recommended) return listed.recommended;
     } catch (e) {
       this.log("model discovery failed, using fallback: " + e);
     }
@@ -1718,6 +2405,56 @@ var PaperOutline = {
     return config;
   },
 
+  // 参数级 400 自动降级适配：服务商拒绝某可选参数时自动移除/转换并重试
+  _adaptPayloadForError(payload, error) {
+    if (!payload || !error) return null;
+    const status = error.status || 0;
+    if (status !== 400 && status !== 422) return null;
+    const low = String(error.body || error.message || "").toLowerCase();
+    const next = Object.assign({}, payload);
+    let changed = false;
+
+    if (Object.prototype.hasOwnProperty.call(next, "temperature") && low.includes("temperature")) {
+      delete next.temperature;
+      changed = true;
+    }
+    if (
+      (Object.prototype.hasOwnProperty.call(next, "thinking") ||
+        Object.prototype.hasOwnProperty.call(next, "enable_thinking") ||
+        Object.prototype.hasOwnProperty.call(next, "reasoning_effort")) &&
+      (low.includes("thinking") || low.includes("reasoning_effort") || low.includes("reasoning"))
+    ) {
+      delete next.thinking;
+      delete next.enable_thinking;
+      delete next.reasoning_effort;
+      changed = true;
+    }
+    if (
+      Object.prototype.hasOwnProperty.call(next, "response_format") &&
+      (low.includes("response_format") || low.includes("json_object") || low.includes("structured"))
+    ) {
+      delete next.response_format;
+      changed = true;
+    }
+    if (
+      Object.prototype.hasOwnProperty.call(next, "max_tokens") &&
+      (low.includes("max_completion_tokens") || low.includes("max_tokens"))
+    ) {
+      next.max_completion_tokens = next.max_tokens;
+      delete next.max_tokens;
+      changed = true;
+    } else if (
+      Object.prototype.hasOwnProperty.call(next, "max_completion_tokens") &&
+      (low.includes("max_tokens") || low.includes("max_completion_tokens"))
+    ) {
+      next.max_tokens = next.max_completion_tokens;
+      delete next.max_completion_tokens;
+      changed = true;
+    }
+
+    return changed ? next : null;
+  },
+
   _isModelError(error) {
     const status = (error && error.status) || 0;
     const text = String(
@@ -1725,7 +2462,14 @@ var PaperOutline = {
     ).toLowerCase();
     return (
       (status === 400 || status === 404 || text.includes("model")) &&
-      (text.includes("model") || text.includes("supported api"))
+      (text.includes("model not found") ||
+        text.includes("no such model") ||
+        text.includes("does not exist") ||
+        text.includes("unknown model") ||
+        text.includes("invalid model") ||
+        text.includes("deprecated") ||
+        text.includes("supported api") ||
+        (status === 404 && text.includes("model")))
     );
   },
 
@@ -1865,13 +2609,14 @@ var PaperOutline = {
   },
 
   async openSettings() {
+    const paneID = this._prefPaneID || "paper-outline-prefpane";
     try {
       if (
         Zotero.Utilities &&
         Zotero.Utilities.Internal &&
         typeof Zotero.Utilities.Internal.openPreferences === "function"
       ) {
-        await Zotero.Utilities.Internal.openPreferences(this.id);
+        await Zotero.Utilities.Internal.openPreferences(paneID);
         return true;
       }
     } catch (e) {
@@ -1880,7 +2625,7 @@ var PaperOutline = {
     try {
       const win = Zotero.getMainWindow();
       if (win && typeof win.openPreferences === "function") {
-        win.openPreferences(this.id);
+        win.openPreferences(paneID);
         return true;
       }
     } catch (e) {}
@@ -1902,11 +2647,12 @@ var PaperOutline = {
   },
 
   _parseMineruResponse(text) {
-    if (!text) return {};
+    if (!text) return null;
     try {
-      return JSON.parse(text);
+      const parsed = JSON.parse(text);
+      return parsed && typeof parsed === "object" ? parsed : null;
     } catch (e) {
-      return {};
+      return null;
     }
   },
 
@@ -1925,7 +2671,8 @@ var PaperOutline = {
     if (key === "-60012") return "没有找到这次识别任务，请重新发起。";
     if (key === "-60013") return "识别结果已过期，请重新发起。";
     if (status === 429) return "MinerU 请求较多，请稍后再试。";
-    if (status >= 500) return "MinerU 服务暂时不可用，请稍后再试。";
+    if (status === 0) return "无法连接 MinerU 服务器，请检查网络或代理。";
+    if (status >= 500) return "MinerU 服务暂时不可用（HTTP " + status + "），请稍后再试。";
     const brief = String(message || "").replace(/\s+/g, " ").trim().slice(0, 120);
     return brief ? "MinerU 识别失败：" + brief : "MinerU 识别失败，请稍后再试。";
   },
@@ -1938,6 +2685,7 @@ var PaperOutline = {
 
   async _mineruJSONRequest(method, url, options) {
     options = options || {};
+    this._validateHttpsUrl(url);
     let xhr;
     try {
       xhr = await Zotero.HTTP.request(method, url, {
@@ -1955,26 +2703,41 @@ var PaperOutline = {
       const status =
         (error && error.xmlhttp && error.xmlhttp.status) || (error && error.status) || 0;
       const code =
-        parsed.code !== undefined && parsed.code !== null ? parsed.code : parsed.msgCode;
+        parsed && parsed.code !== undefined && parsed.code !== null
+          ? parsed.code
+          : parsed && parsed.msgCode;
       if (String(code) === "A0211") this._markMineruExpired(true);
+      // 断网/超时(status===0)、5xx、非有效 JSON 或未返回合法 MinerU 业务 code 时必须报错，严禁误报连接成功
+      const hasValidBusinessCode =
+        !!parsed && code !== undefined && code !== null && String(code).trim() !== "";
       if (
         options.acceptNonAuthError &&
+        status >= 200 &&
+        status < 500 &&
         status !== 401 &&
         status !== 403 &&
+        hasValidBusinessCode &&
         String(code) !== "A0202" &&
         String(code) !== "A0211"
       ) {
         return parsed;
       }
-      throw new Error(this._mineruErrorMessage(code, parsed.msg || raw, status));
+      throw new Error(this._mineruErrorMessage(code, (parsed && parsed.msg) || raw, status));
     }
 
-    const parsed = this._parseMineruResponse(xhr.responseText);
+    const status = (xhr && xhr.status) || 200;
+    if (status === 0 || status >= 500) {
+      throw new Error(this._mineruErrorMessage("", "", status));
+    }
+    const parsed = this._parseMineruResponse(xhr && xhr.responseText);
+    if (!parsed) {
+      throw new Error("MinerU 返回的不是有效 JSON 响应，请检查网络或代理。");
+    }
     const code =
       parsed.code !== undefined && parsed.code !== null ? parsed.code : parsed.msgCode;
     if (String(code) === "A0211") this._markMineruExpired(true);
-    if (String(code) === "A0202" || String(code) === "A0211") {
-      throw new Error(this._mineruErrorMessage(code, parsed.msg, xhr.status || 0));
+    if (String(code) === "A0202" || String(code) === "A0211" || status === 401 || status === 403) {
+      throw new Error(this._mineruErrorMessage(code, parsed.msg, status));
     }
     if (
       !options.acceptNonAuthError &&
@@ -1983,7 +2746,14 @@ var PaperOutline = {
       String(code) !== "0" &&
       String(code).toLowerCase() !== "success"
     ) {
-      throw new Error(this._mineruErrorMessage(code, parsed.msg, xhr.status || 0));
+      throw new Error(this._mineruErrorMessage(code, parsed.msg, status));
+    }
+    if (
+      options.acceptNonAuthError &&
+      status !== 200 &&
+      (code === undefined || code === null || String(code).trim() === "")
+    ) {
+      throw new Error(this._mineruErrorMessage(code, parsed.msg, status));
     }
     return parsed;
   },
@@ -2013,6 +2783,7 @@ var PaperOutline = {
   async testConnection(overrides) {
     const config = await this._prepareAI(overrides, true);
     if (!config.url) throw new Error("请先填写 API URL。");
+    this._validateApiUrl(config.url);
     if (!config.model) throw new Error("没有发现可用模型，请填写模型名称后重试。");
     if (this._needKey(config.provider) && !config.key) {
       throw new Error("请先填写 API Key。");
@@ -2025,22 +2796,23 @@ var PaperOutline = {
       model: config.model,
       stream: false,
       messages: [{ role: "user", content: "Reply only with OK." }],
-      temperature: 0,
     };
-    payload[config.completionTokensParam || "max_tokens"] = 32;
-    // 连接测试只校验可用性，对已声明支持的服务商固定关闭思考，避免短输出被推理占满。
-    if (config.supportsThinking) {
-      payload.thinking = { type: "disabled" };
-    }
-    const result = await this._post(
+    this._applyTemperature(payload, config, 0);
+    payload[config.completionTokensParam || "max_tokens"] = 64;
+    this._applyThinkingPreference(payload, config, "test");
+    const result = await this._postWithParamFallback(
       config.url,
       headers,
       payload,
-      { timeout: 30000 }
+      { timeout: 30000, noRetry: true }
     );
     const choice = result.choices && result.choices[0];
     const message = (choice && choice.message) || result.message;
-    if (!message || typeof message !== "object") {
+    const valid =
+      message &&
+      typeof message === "object" &&
+      (typeof message.content === "string" || typeof message.reasoning_content === "string");
+    if (!valid) {
       throw new Error("接口已连接，但返回格式不是标准的对话结果。请检查接口地址是否兼容 chat/completions。");
     }
     return {
@@ -2058,6 +2830,7 @@ var PaperOutline = {
     let config = opts.config || (await this._prepareAI());
     let { url, model, key, json } = config;
     if (!url) throw new Error("未配置 API URL（自定义服务商需在设置里填写）");
+    this._validateApiUrl(url);
     const headers = {};
     if (key) headers.Authorization = "Bearer " + key;
     const payload = {
@@ -2067,52 +2840,96 @@ var PaperOutline = {
         { role: "system", content: systemPrompt },
         { role: "user", content: userPrompt },
       ],
-      temperature: 0.2,
     };
+    this._applyTemperature(payload, config, 0.2);
     const useJson = opts.json !== undefined ? opts.json : json;
-    if (useJson) payload.response_format = { type: "json_object" }; // 多数服务商支持；不支持的预设里关掉
+    if (useJson) payload.response_format = { type: "json_object" }; // 多数服务商支持；不支持的预设里关掉或自动降级
     this._applyThinkingPreference(payload, config, opts.task);
     let j;
     try {
-      j = await this._post(url, headers, payload);
+      j = await this._postWithParamFallback(url, headers, payload);
     } catch (error) {
-      if (config.modelIsCustom || !this._isModelError(error)) throw error;
-      const refreshed = await this._prepareAI(null, true);
-      if (!refreshed.model || refreshed.model === model) throw error;
+      if (!this._isModelError(error)) throw error;
+      // 保留当前 provider / url / key 重新发现最新可用模型（即使原模型为手填旧值也可热切换兜底）
+      const refreshed = await this._prepareAI(
+        { provider: config.provider, url: config.url, key: config.key, model: "" },
+        true
+      );
+      if (!refreshed || !refreshed.model || refreshed.model === model) throw error;
+      this.log("模型 " + model + " 不可用，已自动热切换为 " + refreshed.model);
       config = refreshed;
       model = refreshed.model;
       payload.model = model;
-      j = await this._post(url, headers, payload);
+      if (/^(?:kimi-k3|o[134](?:[-_]|$))/i.test(model)) delete payload.temperature;
+      j = await this._postWithParamFallback(url, headers, payload);
     }
-    return (
+    const rawContent =
       (j.choices && j.choices[0] && j.choices[0].message && j.choices[0].message.content) ||
       (j.message && j.message.content) ||
-      ""
-    );
+      "";
+    return this._stripThinkingTags(rawContent);
   },
 
-  // 统一的 HTTP POST（用 Zotero.HTTP.request，特权环境、不受网页 CORS 限制）
+  async _postWithParamFallback(url, headers, payload, options) {
+    let current = payload;
+    let degrades = 0;
+    while (true) {
+      try {
+        return await this._post(url, headers, current, options);
+      } catch (error) {
+        if (degrades < 2) {
+          const adapted = this._adaptPayloadForError(current, error);
+          if (adapted) {
+            current = adapted;
+            degrades++;
+            this.log("请求参数自动降级重试 (" + degrades + "/2)");
+            continue;
+          }
+        }
+        throw error;
+      }
+    }
+  },
+
+  // 统一的 HTTP POST（用 Zotero.HTTP.request，特权环境、不受网页 CORS 限制；429/502/503/504/超时指数退避重试）
   async _post(url, headers, payload, options) {
     options = options || {};
-    let xhr;
-    try {
-      xhr = await Zotero.HTTP.request("POST", url, {
-        headers: Object.assign({ "Content-Type": "application/json" }, headers || {}),
-        body: JSON.stringify(payload),
-        responseType: "text",
-        timeout: options.timeout || 180000,
-      });
-    } catch (e) {
-      const error = new Error(this._friendlyError(e));
-      error.status = (e && e.xmlhttp && e.xmlhttp.status) || (e && e.status) || 0;
-      error.body = ((e && e.xmlhttp && e.xmlhttp.responseText) || (e && e.message) || "").toString();
-      throw error;
+    this._validateApiUrl(url);
+    const maxRetries = options.noRetry ? 0 : 2;
+    let lastError = null;
+    for (let attempt = 0; attempt <= maxRetries; attempt++) {
+      let xhr;
+      try {
+        xhr = await Zotero.HTTP.request("POST", url, {
+          headers: Object.assign({ "Content-Type": "application/json" }, headers || {}),
+          body: JSON.stringify(payload),
+          responseType: "text",
+          timeout: options.timeout || 180000,
+        });
+      } catch (e) {
+        const status = (e && e.xmlhttp && e.xmlhttp.status) || (e && e.status) || 0;
+        const body = ((e && e.xmlhttp && e.xmlhttp.responseText) || (e && e.message) || "").toString();
+        const error = new Error(this._friendlyError(e));
+        error.status = status;
+        error.body = body;
+        lastError = error;
+        const retryable =
+          status === 0 || status === 429 || status === 502 || status === 503 || status === 504;
+        if (retryable && attempt < maxRetries) {
+          const waitMs = 1000 * Math.pow(2, attempt) + Math.floor(Math.random() * 300);
+          this.log("_post 重试 (" + (attempt + 1) + "/" + maxRetries + ") status=" + status);
+          await this._sleep(waitMs);
+          continue;
+        }
+        throw error;
+      }
+      try {
+        return JSON.parse(xhr.responseText);
+      } catch (e) {
+        throw new Error("接口已响应，但返回的不是有效 JSON。请检查 API URL 是否为 chat/completions 地址。");
+      }
     }
-    try {
-      return JSON.parse(xhr.responseText);
-    } catch (e) {
-      throw new Error("接口已响应，但返回的不是有效 JSON。请检查 API URL 是否为 chat/completions 地址。");
-    }
+    throw lastError || new Error("AI 接口调用失败。");
   },
 
   // 把底层报错翻译成人话
@@ -2126,14 +2943,14 @@ var PaperOutline = {
       return "服务商已调整可用模型。请把“模型”栏留空后重新测试，插件会自动查询当前可用模型。";
     if (status === 401 || low.includes("invalid api key") || low.includes("incorrect api key") ||
         low.includes("authentication") || low.includes("unauthorized"))
-      return "API Key 无效，请检查是否填写正确（设置 → AI 接口 → API Key）。";
+      return "API Key 无效，请检查是否填写正确（设置 → Paper Outline → AI 服务）。";
     if (status === 402 || low.includes("insufficient") || low.includes("balance") ||
         low.includes("欠费") || low.includes("quota") || low.includes("exceeded"))
       return "账户余额 / 额度不足，请到所选服务商充值后再试。";
     if (status === 429 || low.includes("rate limit") || low.includes("too many"))
-      return "请求过于频繁（被限流）。可把「高级 → 并发数」调小，或稍后再试。";
+      return "请求过于频繁（被限流）。可把「设置 → Paper Outline → 高级选项 → 并发数」调小，或稍后再试。";
     if (status === 404 || low.includes("no such model") || low.includes("model not") || low.includes("not found"))
-      return "接口地址或模型名不对（404）：检查服务商 / 模型名 /（高级里的）API URL。";
+      return "接口地址或模型名不对（404）：请检查「设置 → Paper Outline」中的服务商、模型名与 API URL。";
     if (status === 0 || low.includes("networkerror") || low.includes("timeout") ||
         low.includes("timed out") || low.includes("offline") || low.includes("connection"))
       return "网络连接失败：请检查网络 / 代理，或 API 地址是否可访问。";
@@ -2167,26 +2984,31 @@ var PaperOutline = {
     return [];
   },
 
-  // 按字符数把长文切块，尽量在换行处断开
+  // 按字符数把长文切块，尽量在换行处断开（钳制单块长度 [2000, 200000] 防死循环）
   _splitText(text, maxChars) {
-    if (text.length <= maxChars) return [text];
+    const str = String(text || "");
+    const limit = Math.max(2000, Math.min(200000, parseInt(maxChars, 10) || 40000));
+    if (str.length <= limit) return [str];
     const chunks = [];
     let i = 0;
-    while (i < text.length) {
-      let end = Math.min(i + maxChars, text.length);
-      if (end < text.length) {
-        const nl = text.lastIndexOf("\n", end);
-        if (nl > i + maxChars * 0.5) end = nl;
+    while (i < str.length) {
+      let end = Math.min(i + limit, str.length);
+      if (end < str.length) {
+        const nl = str.lastIndexOf("\n", end);
+        if (nl > i + limit * 0.5) end = nl;
       }
-      chunks.push(text.slice(i, end));
+      if (end <= i) end = Math.min(i + limit, str.length);
+      if (end <= i) break;
+      chunks.push(str.slice(i, end));
       i = end;
     }
     return chunks;
   },
 
-  // 并发池：limit 路并发执行 fn(item, index)
+  // 并发池：limit 路并发执行 fn(item, index)，存在失败块时抛出明确错误，禁止静默返回残缺目录
   async _pool(items, limit, fn) {
     const results = new Array(items.length);
+    const errors = [];
     let cursor = 0;
     const worker = async () => {
       while (cursor < items.length) {
@@ -2194,29 +3016,35 @@ var PaperOutline = {
         try {
           results[idx] = await fn(items[idx], idx);
         } catch (e) {
-          this.log("pool task error: " + e);
-          results[idx] = [];
+          this.log("pool task error [" + idx + "]: " + e);
+          errors.push({ idx, error: e });
         }
       }
     };
-    const n = Math.max(1, Math.min(limit, items.length));
+    const n = Math.max(1, Math.min(parseInt(limit, 10) || 1, items.length));
     await Promise.all(Array.from({ length: n }, worker));
+    if (errors.length) {
+      errors.sort((a, b) => a.idx - b.idx);
+      if (errors.length === 1) throw errors[0].error;
+      const firstMsg = (errors[0].error && errors[0].error.message) || String(errors[0].error);
+      throw new Error("共 " + errors.length + "/" + items.length + " 个分块分析失败：" + firstMsg);
+    }
     return results;
   },
 
-  // 延时（Zotero 的 bluebird Promise.delay；退化到 setTimeout）
+  // 延时（原生 setTimeout，避免依赖 Bluebird 延时 API）
   _sleep(ms) {
-    try {
-      return Zotero.Promise.delay(ms);
-    } catch (e) {
-      return new Promise((r) => {
-        try {
-          Zotero.getMainWindow().setTimeout(r, ms);
-        } catch (e2) {
-          setTimeout(r, ms);
+    return new Promise((resolve) => {
+      try {
+        const win = typeof Zotero !== "undefined" && Zotero.getMainWindow && Zotero.getMainWindow();
+        if (win && typeof win.setTimeout === "function") {
+          win.setTimeout(resolve, ms);
+          return;
         }
-      });
-    }
+      } catch (e) {}
+      if (typeof setTimeout === "function") setTimeout(resolve, ms);
+      else resolve();
+    });
   },
 
   // ════════════════════════════════════════════════════════════════
@@ -2234,13 +3062,16 @@ var PaperOutline = {
     return null;
   },
 
-  _hasReadablePdfText(text) {
+  _hasReadablePdfText(text, pageCount) {
     const compact = String(text || "").replace(/\s+/g, "");
     const meaningful = compact.replace(
       /[^\p{L}\p{N}\u3400-\u9fff]/gu,
       ""
     );
-    return meaningful.length >= 80;
+    if (meaningful.length < 80) return false;
+    const pages = parseInt(pageCount, 10) || 0;
+    if (pages >= 3 && meaningful.length / pages < 35) return false;
+    return true;
   },
 
   _confirmMineru(title, message) {
@@ -2255,9 +3086,11 @@ var PaperOutline = {
     }
   },
 
-  async _ensureMineruReady() {
+  async _ensureMineruReady(opts) {
+    const isAuto = opts && opts.context === "auto";
     const token = String(this.pref("mineruToken", "") || "").trim();
     if (!token) {
+      if (isAuto) return null;
       const open = this._confirmMineru(
         "扫描 PDF 需要文字识别",
         "这份 PDF 没有可读取的文字，Paper Outline 需要先用 MinerU 识别页面内容，才能继续生成总结和目录。\n\n尚未设置 MinerU Token。是否现在打开设置？"
@@ -2268,6 +3101,7 @@ var PaperOutline = {
 
     const status = this.getMineruTokenStatus({ token });
     if (status.state === "expired") {
+      if (isAuto) return null;
       const open = this._confirmMineru(
         "MinerU Token 需要更新",
         "MinerU Token 有效期为 90 天，当前 Token 可能已到期。请重新创建后回到设置中替换。\n\n是否现在前往 MinerU？"
@@ -2280,6 +3114,7 @@ var PaperOutline = {
       this.pref("mineruAutoUpload", false) === true ||
       String(this.pref("mineruAutoUpload", false)) === "true";
     if (!autoUpload) {
+      if (isAuto) return null; // 自动入库未开启自动上传时静默跳过，严禁弹阻塞确认框
       const confirmed = this._confirmMineru(
         "上传扫描 PDF 进行识别",
         "这份 PDF 没有可读取的文字。继续后，当前 PDF 会发送至 MinerU 完成文字识别，识别结果将用于生成总结和目录。\n\n是否上传并继续？"
@@ -2343,6 +3178,7 @@ var PaperOutline = {
   },
 
   async _uploadMineruFile(uploadUrl, path) {
+    this._validateHttpsUrl(uploadUrl);
     const bytes = await IOUtils.read(path);
     // MinerU 的临时上传地址明确要求不要设置 Content-Type。
     // Zotero.HTTP.request() 会在有请求体时自动补上该请求头，因此这里直接使用原生 XHR。
@@ -2436,11 +3272,7 @@ var PaperOutline = {
   },
 
   _localFile(path) {
-    const file = Components.classes["@mozilla.org/file/local;1"].createInstance(
-      Components.interfaces.nsIFile
-    );
-    file.initWithPath(path);
-    return file;
+    return Zotero.File.pathToFile(path);
   },
 
   _mineruBlockText(block) {
@@ -2453,28 +3285,45 @@ var PaperOutline = {
         .join("\n");
     }
 
+    const parts = [];
+    const seen = new Set();
+    const pushPart = (val) => {
+      const s = String(val || "").trim();
+      if (s && !seen.has(s)) {
+        seen.add(s);
+        parts.push(s);
+      }
+    };
+
     for (const key of ["text", "content", "latex", "html"]) {
-      if (typeof block[key] === "string" && block[key].trim()) return block[key].trim();
+      if (typeof block[key] === "string" && block[key].trim()) {
+        pushPart(block[key]);
+      }
     }
+    // 拼接 caption（标题/图注/表注）与 body/table_body/子块，避免丢弃表格或图片的正文或标题
     for (const key of [
-      "blocks",
-      "children",
-      "para_blocks",
-      "body",
       "caption",
       "img_caption",
       "table_caption",
+      "table_body",
+      "body",
+      "blocks",
+      "children",
+      "para_blocks",
+      "table_footnote",
+      "img_footnote",
     ]) {
       if (block[key]) {
         const text = this._mineruBlockText(block[key]);
-        if (text.trim()) return text.trim();
+        if (text.trim()) pushPart(text);
       }
     }
-    return "";
+    return parts.join("\n");
   },
 
   _mineruPagesFromContentList(content, fallbackText) {
     const pageMap = new Map();
+    const MAX_PAGE_IDX = 5000;
     const visit = (value, inheritedPage) => {
       if (value === null || value === undefined) return;
       if (Array.isArray(value)) {
@@ -2487,13 +3336,15 @@ var PaperOutline = {
       if (page === undefined || page === null) page = value.page_index;
       if (page === undefined || page === null) page = inheritedPage;
       if (page !== undefined && page !== null) {
-        const text = this._mineruBlockText(value);
-        if (text.trim()) {
-          const index = Math.max(0, parseInt(page, 10) || 0);
-          const list = pageMap.get(index) || [];
-          list.push(text.trim());
-          pageMap.set(index, list);
-          return;
+        const index = parseInt(page, 10);
+        if (Number.isFinite(index) && index >= 0 && index <= MAX_PAGE_IDX) {
+          const text = this._mineruBlockText(value);
+          if (text.trim()) {
+            const list = pageMap.get(index) || [];
+            list.push(text.trim());
+            pageMap.set(index, list);
+            return;
+          }
         }
       }
 
@@ -2504,7 +3355,7 @@ var PaperOutline = {
     visit(content, undefined);
 
     if (!pageMap.size) return fallbackText ? [String(fallbackText)] : [];
-    const maxPage = Math.max(...pageMap.keys());
+    const maxPage = Math.min(MAX_PAGE_IDX, Math.max(...pageMap.keys()));
     const pages = [];
     for (let index = 0; index <= maxPage; index++) {
       const values = pageMap.get(index) || [];
@@ -2514,6 +3365,7 @@ var PaperOutline = {
   },
 
   async _readMineruZip(arrayBuffer) {
+    const maxZipBytes = this.MINERU_MAX_ZIP_BYTES || 100 * 1024 * 1024;
     const nonce = Date.now() + "-" + Math.random().toString(16).slice(2);
     const zipPath = PathUtils.join(PathUtils.tempDir, "paper-outline-mineru-" + nonce + ".zip");
     const extracted = [];
@@ -2521,6 +3373,9 @@ var PaperOutline = {
     try {
       const bytes =
         arrayBuffer instanceof Uint8Array ? arrayBuffer : new Uint8Array(arrayBuffer);
+      if (bytes.byteLength > maxZipBytes) {
+        throw new Error("MinerU 返回的压缩包超过安全大小限制（100 MB）。");
+      }
       await IOUtils.write(zipPath, bytes);
       reader = Components.classes["@mozilla.org/libjar/zip-reader;1"].createInstance(
         Components.interfaces.nsIZipReader
@@ -2541,13 +3396,43 @@ var PaperOutline = {
         entries.find((name) => /content.*\.json$/i.test(name));
 
       if (!markdownEntry) throw new Error("MinerU 结果中没有找到识别后的正文。");
+      let totalExtractedBytes = 0;
       const extractEntry = async (entry, suffix) => {
+        if (!entry || /(?:^|[/\\])\.\.(?:$|[/\\])|^[/\\]/.test(entry)) {
+          throw new Error("MinerU 压缩包包含非法文件路径。");
+        }
+        try {
+          if (typeof reader.getEntry === "function") {
+            const info = reader.getEntry(entry);
+            const realSize = Number((info && info.realSize) || 0);
+            if (realSize > maxZipBytes) {
+              throw new Error("MinerU 压缩包单文件超出 100 MB 安全上限。");
+            }
+            if (totalExtractedBytes + realSize > maxZipBytes) {
+              throw new Error("MinerU 压缩包总解压体积超出 100 MB 安全上限。");
+            }
+          }
+        } catch (sizeErr) {
+          if (sizeErr && /100 MB/.test(String(sizeErr.message || sizeErr))) throw sizeErr;
+        }
         const target = PathUtils.join(
           PathUtils.tempDir,
           "paper-outline-mineru-" + nonce + suffix
         );
         reader.extract(entry, this._localFile(target));
         extracted.push(target);
+        try {
+          if (typeof IOUtils.stat === "function") {
+            const st = await IOUtils.stat(target);
+            const actualSize = Number((st && st.size) || 0);
+            if (actualSize > maxZipBytes || totalExtractedBytes + actualSize > maxZipBytes) {
+              throw new Error("MinerU 解压文件超出 100 MB 安全上限。");
+            }
+            totalExtractedBytes += actualSize;
+          }
+        } catch (statErr) {
+          if (statErr && /100 MB/.test(String(statErr.message || statErr))) throw statErr;
+        }
         return await IOUtils.readUTF8(target);
       };
 
@@ -2617,6 +3502,7 @@ var PaperOutline = {
   },
 
   _downloadMineruBytes(zipUrl) {
+    this._validateHttpsUrl(zipUrl);
     // 结果位于 MinerU CDN。使用匿名原生 XHR，避免携带 Zotero 的 Cookie 或附加请求头。
     return new Promise((resolve, reject) => {
       let xhr;
@@ -2685,63 +3571,208 @@ var PaperOutline = {
     throw lastError || new Error("识别结果下载失败，请稍后重试。");
   },
 
+  _mineruCacheDir() {
+    try {
+      return PathUtils.join(Zotero.DataDirectory.dir, "paper-outline-mineru-cache");
+    } catch (e) {
+      return null;
+    }
+  },
+
+  _mineruCacheFile(cacheKey) {
+    const dir = this._mineruCacheDir();
+    if (!dir) return null;
+    const safe = String(cacheKey || "item").replace(/[^a-zA-Z0-9_-]/g, "_").slice(0, 80);
+    return PathUtils.join(dir, safe + ".json");
+  },
+
+  async _readMineruDiskCache(cacheKey) {
+    try {
+      const file = this._mineruCacheFile(cacheKey);
+      if (!file || typeof IOUtils === "undefined" || !(await IOUtils.exists(file))) return null;
+      const parsed = JSON.parse(await IOUtils.readUTF8(file));
+      if (parsed && typeof parsed.text === "string" && parsed.text.trim()) {
+        return {
+          text: parsed.text,
+          pages: Array.isArray(parsed.pages) ? parsed.pages : null,
+        };
+      }
+    } catch (e) {
+      this.log("readMineruDiskCache: " + e);
+    }
+    return null;
+  },
+
+  async _writeMineruDiskCache(cacheKey, result) {
+    try {
+      const dir = this._mineruCacheDir();
+      const file = this._mineruCacheFile(cacheKey);
+      if (!dir || !file || typeof IOUtils === "undefined") return;
+      if (typeof IOUtils.makeDirectory === "function") {
+        await IOUtils.makeDirectory(dir, { ignoreExisting: true });
+      }
+      const data = JSON.stringify({
+        text: result.text,
+        pages: result.pages || null,
+        savedAt: Date.now(),
+      });
+      await IOUtils.writeUTF8(file, data, { tmpPath: file + ".tmp" });
+    } catch (e) {
+      this.log("writeMineruDiskCache: " + e);
+    }
+  },
+
+  async clearMineruCacheUI() {
+    try {
+      const win = Zotero.getMainWindow();
+      const memCount = this._mineruTextCache ? this._mineruTextCache.size : 0;
+      let diskFiles = [];
+      const dir = this._mineruCacheDir();
+      if (dir && typeof IOUtils !== "undefined" && (await IOUtils.exists(dir))) {
+        try {
+          if (typeof IOUtils.getChildren === "function") {
+            diskFiles = await IOUtils.getChildren(dir);
+          }
+        } catch (e) {}
+      }
+      const total = Math.max(memCount, diskFiles.length);
+      if (!total) {
+        if (win) win.alert("当前没有已缓存的 MinerU 识别结果。");
+        return;
+      }
+      if (win && !win.confirm("已缓存 " + total + " 份扫描 PDF 的 MinerU 识别结果，确认全部清空？")) {
+        return;
+      }
+      if (this._mineruTextCache) this._mineruTextCache.clear();
+      if (dir && typeof IOUtils !== "undefined" && (await IOUtils.exists(dir))) {
+        try {
+          await IOUtils.remove(dir, { recursive: true, ignoreAbsent: true });
+        } catch (e) {
+          for (const f of diskFiles) {
+            try { await IOUtils.remove(f, { ignoreAbsent: true }); } catch (e2) {}
+          }
+        }
+      }
+      if (win) win.alert("已清空 " + total + " 份 MinerU 识别缓存。");
+    } catch (e) {
+      this.log("clearMineruCacheUI: " + e);
+    }
+  },
+
+  _detectMineruLanguage(att) {
+    try {
+      const parent = (att && att.parentItem) || att;
+      const lang =
+        parent && typeof parent.getField === "function"
+          ? String(parent.getField("language") || "").trim().toLowerCase()
+          : "";
+      if (lang) {
+        if (/^(?:en|eng|english)\b/.test(lang)) return "en";
+        if (/^(?:zh|cn|chs|cht|chinese)\b|中文|汉语/.test(lang)) return "ch";
+      }
+      const title =
+        parent && typeof parent.getField === "function"
+          ? String(parent.getField("title") || "")
+          : "";
+      if (/[\u3400-\u9fff]/.test(title)) return "ch";
+      if (/[a-z]{4,}/i.test(title)) return "en";
+    } catch (e) {}
+    return "ch";
+  },
+
   async _recognizeWithMineru(att, opts) {
     opts = opts || {};
     if (!this._mineruTextCache) this._mineruTextCache = new Map();
-    const cacheKey = String(att && (att.id || att.key || att.attachmentFilename));
+    if (!this._mineruInFlight) this._mineruInFlight = new Map();
+    const cacheKey = String(att && (att.key || att.id || att.attachmentFilename));
     if (this._mineruTextCache.has(cacheKey)) {
       return this._mineruTextCache.get(cacheKey);
     }
+    const diskCached = await this._readMineruDiskCache(cacheKey);
+    if (diskCached) {
+      this._mineruTextCache.set(cacheKey, diskCached);
+      return diskCached;
+    }
+    if (this._mineruInFlight.has(cacheKey)) {
+      return await this._mineruInFlight.get(cacheKey);
+    }
 
-    const token = await this._ensureMineruReady();
-    const path = await this._attachmentFilePath(att);
-    const filename =
-      att.attachmentFilename ||
-      (typeof PathUtils.filename === "function" ? PathUtils.filename(path) : "paper.pdf");
-    if (opts.onText) opts.onText("正在准备扫描 PDF…");
-    const created = await this._mineruJSONRequest(
-      "POST",
-      this.MINERU_API_BASE + "/file-urls/batch",
-      {
-        headers: Object.assign(
-          { "Content-Type": "application/json" },
-          this._mineruAuthHeaders(token)
-        ),
-        body: JSON.stringify({
-          files: [
-            {
-              name: filename,
-              data_id: cacheKey,
-              is_ocr: true,
-            },
-          ],
-          model_version: "vlm",
-          enable_formula: true,
-          enable_table: true,
-          language: "ch",
-        }),
-        timeout: 60000,
+    const token = await this._ensureMineruReady(opts);
+    if (!token) {
+      return { text: "", pages: null, skipped: true };
+    }
+
+    const run = (async () => {
+      const path = await this._attachmentFilePath(att);
+      try {
+        if (typeof IOUtils !== "undefined" && typeof IOUtils.stat === "function") {
+          const st = await IOUtils.stat(path);
+          const maxBytes = this.MINERU_MAX_UPLOAD_BYTES || 200 * 1024 * 1024;
+          if (st && st.size > maxBytes) {
+            throw new Error("这份 PDF 超过 200 MB，超出 MinerU 当前允许的文件大小。");
+          }
+        }
+      } catch (sizeErr) {
+        if (sizeErr && /200 MB/.test(String(sizeErr.message || sizeErr))) throw sizeErr;
       }
-    );
-    const data = created.data || {};
-    const batchID = data.batch_id || data.batchId;
-    const uploadUrls = data.file_urls || data.fileUrls || [];
-    const uploadUrl =
-      (uploadUrls[0] && (uploadUrls[0].url || uploadUrls[0].file_url)) || uploadUrls[0];
-    if (!batchID || !uploadUrl) {
-      throw new Error("MinerU 没有返回上传地址，请稍后重试。");
-    }
 
-    if (opts.onText) opts.onText("正在上传扫描 PDF 至 MinerU…");
-    await this._uploadMineruFile(uploadUrl, path);
-    const zipUrl = await this._waitForMineruResult(batchID, token, opts.onText);
-    if (opts.onText) opts.onText("正在读取识别结果…");
-    const result = await this._downloadMineruResult(zipUrl, opts.onText);
-    if (!result.text || !result.text.trim()) {
-      throw new Error("MinerU 已完成识别，但没有识别出可用文字。");
+      const filename =
+        att.attachmentFilename ||
+        (typeof PathUtils.filename === "function" ? PathUtils.filename(path) : "paper.pdf");
+      const language = this._detectMineruLanguage(att);
+      if (opts.onText) opts.onText("正在准备扫描 PDF…");
+      const created = await this._mineruJSONRequest(
+        "POST",
+        this.MINERU_API_BASE + "/file-urls/batch",
+        {
+          headers: Object.assign(
+            { "Content-Type": "application/json" },
+            this._mineruAuthHeaders(token)
+          ),
+          body: JSON.stringify({
+            files: [
+              {
+                name: filename,
+                data_id: cacheKey,
+                is_ocr: true,
+              },
+            ],
+            model_version: "vlm",
+            enable_formula: true,
+            enable_table: true,
+            language,
+          }),
+          timeout: 60000,
+        }
+      );
+      const data = created.data || {};
+      const batchID = data.batch_id || data.batchId;
+      const uploadUrls = data.file_urls || data.fileUrls || [];
+      const uploadUrl =
+        (uploadUrls[0] && (uploadUrls[0].url || uploadUrls[0].file_url)) || uploadUrls[0];
+      if (!batchID || !uploadUrl) {
+        throw new Error("MinerU 没有返回上传地址，请稍后重试。");
+      }
+
+      if (opts.onText) opts.onText("正在上传扫描 PDF 至 MinerU…");
+      await this._uploadMineruFile(uploadUrl, path);
+      const zipUrl = await this._waitForMineruResult(batchID, token, opts.onText);
+      if (opts.onText) opts.onText("正在读取识别结果…");
+      const result = await this._downloadMineruResult(zipUrl, opts.onText);
+      if (!result.text || !result.text.trim()) {
+        throw new Error("MinerU 已完成识别，但没有识别出可用文字。");
+      }
+      this._mineruTextCache.set(cacheKey, result);
+      await this._writeMineruDiskCache(cacheKey, result);
+      return result;
+    })();
+
+    this._mineruInFlight.set(cacheKey, run);
+    try {
+      return await run;
+    } finally {
+      this._mineruInFlight.delete(cacheKey);
     }
-    this._mineruTextCache.set(cacheKey, result);
-    return result;
   },
 
   async _getTextBundleForItem(att, opts) {
@@ -2751,7 +3782,7 @@ var PaperOutline = {
       const pages = await this._getWorkerPages(att);
       if (pages && pages.length) {
         const t = pages.join("\n");
-        if (this._hasReadablePdfText(t)) {
+        if (this._hasReadablePdfText(t, pages.length)) {
           return { text: t, pages, source: "local" };
         }
       }
@@ -2764,6 +3795,9 @@ var PaperOutline = {
     } catch (e) {}
     if (opts.allowOCR === false) return { text: "", pages: null, source: "empty" };
     const recognized = await this._recognizeWithMineru(att, opts);
+    if (recognized && recognized.skipped) {
+      return { text: "", pages: null, source: "skipped" };
+    }
     return {
       text: recognized.text,
       pages: recognized.pages,
@@ -2798,6 +3832,87 @@ var PaperOutline = {
     return parts.join(marker).slice(0, limit);
   },
 
+  // 裁掉正文后半段（>55%）出现的文末参考文献表，节省上下文与 token 消耗。
+  _stripReferencesForAI(text) {
+    const s = String(text || "");
+    if (s.length < 400) return s;
+    const minOffset = Math.floor(s.length * 0.55);
+    const re =
+      /(?:^|\n)[ \t]*(?:#{1,4}[ \t]+|\*{2})?(?:(?:\d+(?:\.\d+)*|[IVX]+|[一二三四五六七八九十]+)[.、．)\s]+)?(?:References|Bibliography|Works\s+Cited|Literature\s+Cited|参\s*考\s*文\s*献|引\s*用\s*文\s*献|主要参考文献)(?:\*{2})?[ \t]*(?=\n|$)/gi;
+    let m;
+    while ((m = re.exec(s)) !== null) {
+      if (m.index >= minOffset) {
+        return s.slice(0, m.index).trimEnd();
+      }
+    }
+    return s;
+  },
+
+  _formatItemMetadata(item) {
+    const getField = (field, ...args) => {
+      try {
+        return item && typeof item.getField === "function"
+          ? String(item.getField(field, ...args) || "").trim()
+          : "";
+      } catch (e) {
+        return "";
+      }
+    };
+    const lines = [];
+    const title = getField("title");
+    lines.push("论文标题：" + title);
+
+    let authors = "";
+    try {
+      if (item && typeof item.getCreators === "function") {
+        const creators = item.getCreators() || [];
+        const names = creators
+          .map((c) => {
+            if (!c) return "";
+            if (c.name) return String(c.name).trim();
+            return [c.lastName, c.firstName].filter(Boolean).join(", ").trim();
+          })
+          .filter(Boolean);
+        if (names.length) {
+          authors = names.slice(0, 6).join("；") + (names.length > 6 ? " 等" : "");
+        }
+      }
+    } catch (e) {}
+    if (!authors) authors = getField("firstCreator") || String((item && item.firstCreator) || "").trim();
+    if (authors) lines.push("作者：" + authors);
+
+    const rawDate = getField("date", true, true) || getField("date");
+    const yearMatch = rawDate.match(/(?:^|\D)((?:1[5-9]|20|21)\d{2})(?=\D|$)/);
+    if (yearMatch && yearMatch[1] !== "0000") lines.push("年份：" + yearMatch[1]);
+
+    const pub =
+      getField("publicationTitle") ||
+      getField("bookTitle") ||
+      getField("proceedingsTitle") ||
+      getField("university");
+    if (pub) lines.push("刊物/出处：" + pub);
+
+    const abs = getField("abstractNote");
+    if (abs) lines.push("摘要：" + abs.slice(0, 800));
+
+    return lines.join("\n") + "\n\n论文全文：\n\n";
+  },
+
+  _resolveSummaryPrompt() {
+    const presetKey = String(this.pref("summaryPreset", "humanities") || "humanities").trim();
+    const presetPrompt =
+      (this.SUMMARY_PROMPT_PRESETS && this.SUMMARY_PROMPT_PRESETS[presetKey]) ||
+      this.SUMMARY_PROMPT;
+    const stored = String(Zotero.Prefs.get("extensions.paperoutline.summaryPrompt", true) || "").trim();
+    if (!stored) return presetPrompt;
+    // 若用户未手动改写（仍等于默认或任一内置预设），按当前选定的 summaryPreset 生效
+    const builtIns = Object.values(this.SUMMARY_PROMPT_PRESETS || {});
+    if (stored === this.SUMMARY_PROMPT || builtIns.includes(stored)) {
+      return presetPrompt;
+    }
+    return stored;
+  },
+
   // 生成整篇总结文本（opts.fullText 已有则复用，避免重复抽取；opts.att 指定 PDF）
   async generateSummary(item, onText, opts) {
     opts = opts || {};
@@ -2812,9 +3927,12 @@ var PaperOutline = {
       });
     }
     if (!full || !full.trim()) throw new Error("没有识别出可用的论文文字。");
-    const sys = this.pref("summaryPrompt", this.SUMMARY_PROMPT);
-    const titlePrefix = "论文标题：" + (item.getField("title") || "") + "\n\n论文全文：\n\n";
-    const config = await this._prepareAI();
+    if (this.pref("trimReferences", true) !== false) {
+      full = this._stripReferencesForAI(full);
+    }
+    const sys = this._resolveSummaryPrompt();
+    const titlePrefix = this._formatItemMetadata(item);
+    const config = opts.config || (await this._prepareAI());
     const maxChars = this._summaryInputLimit(config, sys, titlePrefix);
     const text = this._textForSummary(full, maxChars);
     if (onText) onText("AI 总结中…");
@@ -2830,11 +3948,7 @@ var PaperOutline = {
 
   // 拼装总结笔记 HTML（含 SUMMARY_MARKER 供去重识别）。总结正文走轻量 Markdown→HTML。
   _renderSummaryNote(title, summary) {
-    const esc = (s) =>
-      String(s || "")
-        .replace(/&/g, "&amp;")
-        .replace(/</g, "&lt;")
-        .replace(/>/g, "&gt;");
+    const esc = (s) => this._escapeHtml(s);
     return (
       `<h1>📝 ${esc(title)} — AI 总结</h1>` +
       `<p style="color:#888"><i>${esc(this.SUMMARY_MARKER)}</i></p>` +
@@ -2842,36 +3956,150 @@ var PaperOutline = {
     );
   },
 
-  // 轻量 Markdown→HTML（供总结笔记用）：支持 #/##/### 标题、- * 无序列表、1. 有序列表、**加粗**。
-  // 先转义 HTML 实体，再在转义后的文本上套标记，安全且足够覆盖 AI 的常见 Markdown 输出。
+  // Markdown→HTML（供总结笔记用）：支持标题、表格、引用块、围栏代码块、行内代码、加粗、斜体、分割线与嵌套列表。
+  // 先转义 HTML 实体，再在转义后的文本上套标记，安全覆盖 AI 的常见 Markdown 输出。
   _mdToNoteHtml(md) {
-    const esc = (s) =>
-      String(s || "")
-        .replace(/&/g, "&amp;")
-        .replace(/</g, "&lt;")
-        .replace(/>/g, "&gt;");
-    const inline = (s) =>
-      esc(s)
+    const esc = (s) => this._escapeHtml(s);
+    const inline = (s) => {
+      const codeTokens = [];
+      let text = String(s || "").replace(/`([^`\n]+)`/g, (_, code) => {
+        const idx = codeTokens.length;
+        codeTokens.push(
+          '<code style="background:rgba(127,127,127,.14);padding:1px 4px;border-radius:3px;">' +
+            esc(code) +
+            "</code>"
+        );
+        return "\x00CODE" + idx + "\x00";
+      });
+      text = esc(text)
         .replace(/\*\*([^*\n]+)\*\*/g, "<strong>$1</strong>")
-        .replace(/__([^_\n]+)__/g, "<strong>$1</strong>");
+        .replace(/__([^_\n]+)__/g, "<strong>$1</strong>")
+        .replace(/(^|[^*])\*([^*\n]+)\*(?!\*)/g, "$1<em>$2</em>");
+      return text.replace(/\x00CODE(\d+)\x00/g, (_, idx) => codeTokens[parseInt(idx, 10)] || "");
+    };
+
+    const parseTableCells = (line) => {
+      let s = line.trim();
+      if (s.startsWith("|")) s = s.slice(1);
+      if (s.endsWith("|")) s = s.slice(0, -1);
+      return s.split("|").map((c) => c.trim());
+    };
+    const isTableSep = (line) =>
+      /^\|?\s*:?-{3,}:?\s*(?:\|\s*:?-{3,}:?\s*)+\|?$/.test(line.trim());
+
     const lines = String(md || "").replace(/\r\n?/g, "\n").split("\n");
     const out = [];
-    let list = null; // "ul" | "ol"
-    const closeList = () => {
-      if (list) {
-        out.push("</" + list + ">");
-        list = null;
+    const listStack = []; // [{ type: "ul"|"ol", indent: number }]
+    let inQuote = false;
+    let inCode = false;
+    let codeBuf = [];
+
+    const closeListsTo = (minIndent) => {
+      while (listStack.length && listStack[listStack.length - 1].indent >= minIndent) {
+        const top = listStack.pop();
+        out.push("</" + top.type + ">");
       }
     };
-    for (const raw of lines) {
-      const line = raw.trim();
-      if (!line) {
-        closeList();
+    const closeAllLists = () => closeListsTo(-1);
+    const closeQuote = () => {
+      if (inQuote) {
+        out.push("</blockquote>");
+        inQuote = false;
+      }
+    };
+
+    for (let i = 0; i < lines.length; i++) {
+      const raw = lines[i];
+      const trimmed = raw.trim();
+
+      // 围栏代码块
+      if (/^```/.test(trimmed)) {
+        if (!inCode) {
+          closeAllLists();
+          closeQuote();
+          inCode = true;
+          codeBuf = [];
+        } else {
+          out.push(
+            '<pre style="background:rgba(127,127,127,.1);padding:8px 10px;border-radius:6px;overflow-x:auto;"><code>' +
+              esc(codeBuf.join("\n")) +
+              "</code></pre>"
+          );
+          inCode = false;
+          codeBuf = [];
+        }
         continue;
       }
+      if (inCode) {
+        codeBuf.push(raw);
+        continue;
+      }
+
+      if (!trimmed) {
+        closeAllLists();
+        closeQuote();
+        continue;
+      }
+
+      // 分割线
+      if (/^(?:---+|\*\*\*+|___+)$/.test(trimmed)) {
+        closeAllLists();
+        closeQuote();
+        out.push("<hr/>");
+        continue;
+      }
+
+      // Markdown 表格（表头行 + 分隔行 + 数据行）
+      if (
+        trimmed.includes("|") &&
+        i + 1 < lines.length &&
+        isTableSep(lines[i + 1])
+      ) {
+        closeAllLists();
+        closeQuote();
+        const headers = parseTableCells(trimmed);
+        i += 1; // 跳过分隔行
+        const bodyRows = [];
+        while (i + 1 < lines.length && lines[i + 1].trim() && lines[i + 1].includes("|")) {
+          i += 1;
+          bodyRows.push(parseTableCells(lines[i]));
+        }
+        const cellStyle = 'style="border:1px solid rgba(127,127,127,.35);padding:4px 8px;text-align:left;"';
+        let tbl = '<table style="border-collapse:collapse;width:100%;margin:8px 0;"><thead><tr>';
+        for (const h of headers) tbl += "<th " + cellStyle + ">" + inline(h) + "</th>";
+        tbl += "</tr></thead>";
+        if (bodyRows.length) {
+          tbl += "<tbody>";
+          for (const r of bodyRows) {
+            tbl += "<tr>";
+            for (let c = 0; c < Math.max(headers.length, r.length); c++) {
+              tbl += "<td " + cellStyle + ">" + inline(r[c] || "") + "</td>";
+            }
+            tbl += "</tr>";
+          }
+          tbl += "</tbody>";
+        }
+        tbl += "</table>";
+        out.push(tbl);
+        continue;
+      }
+
+      // 引用块 >
       let m;
-      if ((m = line.match(/^(#{1,6})\s+(.*)$/))) {
-        closeList();
+      if ((m = trimmed.match(/^>\s?(.*)$/))) {
+        closeAllLists();
+        if (!inQuote) {
+          out.push('<blockquote style="border-left:3px solid #999;margin:6px 0;padding:2px 10px;opacity:.9;">');
+          inQuote = true;
+        }
+        out.push("<p style=\"margin:2px 0;\">" + inline(m[1]) + "</p>");
+        continue;
+      }
+      closeQuote();
+
+      // 标题
+      if ((m = trimmed.match(/^(#{1,6})\s+(.*)$/))) {
+        closeAllLists();
         // # → h2，## → h3，### 及更深 → h4（笔记标题已占 h1）。
         // 显式字号 + 下限 14px：避免深层标题用默认 h4/h5/h6 渲染得比正文还小、视觉骤降。
         const lvl = Math.min(4, m[1].length + 1);
@@ -2884,28 +4112,46 @@ var PaperOutline = {
         );
         continue;
       }
-      if ((m = line.match(/^(?:[-*]|•|·)\s+(.*)$/))) {
-        if (list !== "ul") {
-          closeList();
-          out.push("<ul>");
-          list = "ul";
+
+      // 有序 / 无序列表（支持缩进嵌套）
+      const leadingSpaces = raw.replace(/\t/g, "  ").match(/^ */)[0].length;
+      const ulMatch = trimmed.match(/^(?:[-*+]|•|·)\s+(.*)$/);
+      const olMatch = !ulMatch && trimmed.match(/^\d+[.、)]\s+(.*)$/);
+      if (ulMatch || olMatch) {
+        const listType = ulMatch ? "ul" : "ol";
+        const content = (ulMatch || olMatch)[1];
+        const indent = Math.floor(leadingSpaces / 2);
+        while (listStack.length && listStack[listStack.length - 1].indent > indent) {
+          out.push("</" + listStack.pop().type + ">");
         }
-        out.push("<li>" + inline(m[1]) + "</li>");
+        if (
+          !listStack.length ||
+          listStack[listStack.length - 1].indent < indent ||
+          listStack[listStack.length - 1].type !== listType
+        ) {
+          if (listStack.length && listStack[listStack.length - 1].indent === indent) {
+            out.push("</" + listStack.pop().type + ">");
+          }
+          out.push("<" + listType + ">");
+          listStack.push({ type: listType, indent });
+        }
+        out.push("<li>" + inline(content) + "</li>");
         continue;
       }
-      if ((m = line.match(/^\d+[.、)]\s+(.*)$/))) {
-        if (list !== "ol") {
-          closeList();
-          out.push("<ol>");
-          list = "ol";
-        }
-        out.push("<li>" + inline(m[1]) + "</li>");
-        continue;
-      }
-      closeList();
-      out.push("<p>" + inline(line) + "</p>");
+
+      closeAllLists();
+      out.push("<p>" + inline(trimmed) + "</p>");
     }
-    closeList();
+
+    if (inCode && codeBuf.length) {
+      out.push(
+        '<pre style="background:rgba(127,127,127,.1);padding:8px 10px;border-radius:6px;overflow-x:auto;"><code>' +
+          esc(codeBuf.join("\n")) +
+          "</code></pre>"
+      );
+    }
+    closeAllLists();
+    closeQuote();
     return out.join("") || "<p>" + esc(md) + "</p>";
   },
 
@@ -2947,7 +4193,7 @@ var PaperOutline = {
   async runSummaryOnSelected() {
     const pane = Zotero.getActiveZoteroPane();
     const win = Zotero.getMainWindow();
-    const items = (pane ? pane.getSelectedItems() : []).filter((i) => i.isRegularItem());
+    const items = this._selectedRegularItems(pane);
     if (!items.length) {
       if (win) win.alert("请先选中至少一篇文献条目。");
       return;
@@ -2981,20 +4227,22 @@ var PaperOutline = {
     pw.startCloseTimer(4000);
   },
 
-  // ── 自动模式下生成目录（无 reader）：worker 抽页 → AI → 补页码 → 缓存 ──
-  async _buildOutlineAuto(item, att, onText) {
-    const bundle = await this._getTextBundleForItem(att, {
-      context: "auto",
-      onText,
-    });
-    const pages = bundle.pages;
+  // ── 自动模式下生成目录（无 reader）：复用已抽取的 bundle（若有）→ AI → 补页码 → 缓存 ──
+  async _buildOutlineAuto(item, att, onText, preExtractedBundle) {
+    const bundle =
+      preExtractedBundle ||
+      (await this._getTextBundleForItem(att, {
+        context: "auto",
+        onText,
+      }));
+    const pages = bundle && bundle.pages;
     const pagedText =
       pages && pages.length
         ? pages.map((t, i) => `\n\n===== 第 ${i + 1} 页 =====\n` + t).join("")
         : null;
     const outline = await this.generateOutline(item, onText, {
       pagedText,
-      fullText: bundle.text,
+      fullText: bundle && bundle.text,
       att,
       context: "auto",
     });
@@ -3056,10 +4304,18 @@ var PaperOutline = {
     } catch (e) {
       this.log("unregisterAutoObserver: " + e);
     }
+    this._autoQueue = [];
+    if (this._autoSet) this._autoSet.clear();
+  },
+
+  unregisterAuto() {
+    this._shuttingDown = true;
+    this.unregisterAutoObserver();
   },
 
   // 仅在 PDF 附件被新增时触发（→ 其父文献条目）。覆盖浏览器抓取 / 拖入 PDF / 按 DOI 添加等。
   _onNotify(event, type, ids) {
+    if (this._shuttingDown) return;
     if (event !== "add") return;
     if (!this._autoOutlineOn() && !this._autoSummaryOn()) return; // 两个开关都关 = 不监听
     if (!this._hasRequiredAIKey()) return; // 当前服务商没配 Key 不打扰
@@ -3078,6 +4334,7 @@ var PaperOutline = {
   },
 
   _enqueueAuto(itemID) {
+    if (this._shuttingDown) return;
     if (!this._autoSet) this._autoSet = new Set();
     if (this._autoSet.has(itemID)) return;
     this._autoSet.add(itemID);
@@ -3090,7 +4347,7 @@ var PaperOutline = {
     if (this._autoRunning) return;
     this._autoRunning = true;
     try {
-      while (this._autoQueue.length) {
+      while (this._autoQueue.length && !this._shuttingDown) {
         const id = this._autoQueue.shift();
         try {
           await this._autoProcess(id);
@@ -3098,6 +4355,7 @@ var PaperOutline = {
           this.log("auto process " + id + ": " + e);
         }
         if (this._autoSet) this._autoSet.delete(id);
+        if (this._shuttingDown) break;
         await this._sleep(1200);
       }
     } finally {
@@ -3106,6 +4364,7 @@ var PaperOutline = {
   },
 
   async _autoProcess(itemID) {
+    if (this._shuttingDown) return;
     const item = Zotero.Items.get(itemID);
     if (!item || !item.isRegularItem()) return;
     const wantOutline = this._autoOutlineOn();
@@ -3113,39 +4372,46 @@ var PaperOutline = {
     if (!wantOutline && !wantSummary) return;
     if (!this._hasRequiredAIKey()) return;
 
+    // 先检查总结笔记与目录缓存是否均已存在，已存在直接跳过，避免浪费 PDF 解析与 OCR
+    const needSummary = wantSummary && !this._findSummaryNote(item);
+    const needOutline = wantOutline && !this._getCache(item.key);
+    if (!needSummary && !needOutline) return;
+
     const att = await this._bestPdf(item);
     if (!att) return; // 没 PDF（可能还没下完）→ 等下次（再加 PDF 会再触发）
 
-    // 等正文就绪：刚入库时文件可能还在写入/抽取，重试几次
-    let full = "";
+    // 等正文就绪：刚入库时文件可能还在写入/抽取，重试几次；单次抽取 bundle 供总结与目录共用
+    let bundle = null;
     for (let i = 0; i < 4; i++) {
-      full = await this._getFullTextForItem(att, { allowOCR: false });
-      if (full.trim()) break;
+      if (this._shuttingDown) return;
+      bundle = await this._getTextBundleForItem(att, { allowOCR: false });
+      if (bundle && bundle.text && bundle.text.trim()) break;
       await this._sleep(3000);
     }
-    if (!full.trim()) {
-      full = await this._getFullTextForItem(att, { context: "auto" });
+    if (!bundle || !bundle.text || !bundle.text.trim()) {
+      if (this._shuttingDown) return;
+      bundle = await this._getTextBundleForItem(att, { context: "auto" });
     }
-    if (!full.trim()) return;
+    if (!bundle || !bundle.text || !bundle.text.trim()) return;
 
     const did = [];
-    if (wantSummary) {
+    if (needSummary && !this._shuttingDown) {
       try {
-        if (!this._findSummaryNote(item)) {
-          const summary = await this.generateSummary(item, null, { att, fullText: full });
-          await this._saveSummaryNote(item, summary, {});
-          did.push("总结");
-        }
+        const summary = await this.generateSummary(item, null, {
+          att,
+          fullText: bundle.text,
+          context: "auto",
+        });
+        await this._saveSummaryNote(item, summary, {});
+        did.push("总结");
       } catch (e) {
         this.log("auto summary " + item.key + ": " + e);
       }
     }
-    if (wantOutline) {
+    if (needOutline && !this._shuttingDown) {
       try {
-        if (!this._getCache(item.key)) {
-          const o = await this._buildOutlineAuto(item, att, null);
-          if (o && o.length) did.push("目录");
-        }
+        const o = await this._buildOutlineAuto(item, att, null, bundle);
+        if (o && o.length) did.push("目录");
       } catch (e) {
         this.log("auto outline " + item.key + ": " + e);
       }
@@ -3182,7 +4448,7 @@ var PaperOutline = {
   // 读取当前 PDF 对应条目的「题名 - 作者 - 年份」，与 Zotero 标签页提示信息保持一致。
   _getReaderInfoText(reader) {
     try {
-      const att = reader && reader._item;
+      const att = this._getReaderAttachment(reader);
       const item = (att && att.parentItem) || att;
       if (!item) return "";
       const getField = (field, ...args) => {
@@ -3268,7 +4534,7 @@ var PaperOutline = {
     if (action === "copy-info") {
       this.copyReaderInfo(reader);
     } else if (action === "copy-pdf") {
-      this.copyAttachmentFile(reader && reader._item);
+      this.copyAttachmentFile(this._getReaderAttachment(reader));
     }
   },
 
@@ -3292,8 +4558,127 @@ var PaperOutline = {
     try { delete doc.__paperOutlineReaderInfoActivation; } catch (e) {}
   },
 
+  _makeSvgEl(doc, tag, attrs) {
+    const SVG_NS = "http://www.w3.org/2000/svg";
+    const el =
+      typeof doc.createElementNS === "function"
+        ? doc.createElementNS(SVG_NS, tag)
+        : doc.createElement(tag);
+    if (attrs) {
+      for (const [k, v] of Object.entries(attrs)) {
+        el.setAttribute(k, String(v));
+      }
+    }
+    return el;
+  },
+
+  _makeHtmlEl(doc, tag) {
+    return typeof doc.createElementNS === "function"
+      ? doc.createElementNS(this.HTML_NS, tag)
+      : doc.createElement(tag);
+  },
+
+  _makeReaderActionIconElement(doc, action) {
+    const svg = this._makeSvgEl(doc, "svg", {
+      width: 13,
+      height: 13,
+      viewBox: "0 0 16 16",
+      fill: "none",
+      "aria-hidden": "true",
+    });
+    if (action === "copy-pdf") {
+      svg.appendChild(
+        this._makeSvgEl(doc, "path", {
+          d: "M3.2 2.2h6l3.6 3.6v7.6c0 .7-.6 1.2-1.2 1.2H3.2c-.7 0-1.2-.6-1.2-1.2v-10c0-.7.6-1.2 1.2-1.2Z",
+          stroke: "currentColor",
+          "stroke-width": "1.25",
+        })
+      );
+      svg.appendChild(
+        this._makeSvgEl(doc, "path", {
+          d: "M9.2 2.4v3.4h3.4M4.1 11.9V8.1h1.4c.8 0 1.3.4 1.3 1.1s-.5 1.1-1.3 1.1H4.2M8 11.9V8.1h1c1.2 0 2 .7 2 1.9s-.8 1.9-2 1.9H8Z",
+          stroke: "currentColor",
+          "stroke-width": ".9",
+          "stroke-linecap": "round",
+          "stroke-linejoin": "round",
+        })
+      );
+    } else {
+      svg.appendChild(
+        this._makeSvgEl(doc, "rect", {
+          x: "5.2",
+          y: "4.8",
+          width: "7.3",
+          height: "8",
+          rx: "1.4",
+          stroke: "currentColor",
+          "stroke-width": "1.35",
+        })
+      );
+      svg.appendChild(
+        this._makeSvgEl(doc, "path", {
+          d: "M10.4 4.8V3.6c0-.8-.6-1.4-1.4-1.4H4.1c-.8 0-1.4.6-1.4 1.4v6.1c0 .8.6 1.4 1.4 1.4h1.1",
+          stroke: "currentColor",
+          "stroke-width": "1.35",
+          "stroke-linecap": "round",
+        })
+      );
+    }
+    return svg;
+  },
+
+  _makeCatIconElement(doc, size) {
+    const px = parseInt(size, 10) || 20;
+    const svg = this._makeSvgEl(doc, "svg", {
+      width: px,
+      height: px,
+      viewBox: "0 0 24 24",
+      fill: "none",
+      "aria-hidden": "true",
+    });
+    svg.appendChild(
+      this._makeSvgEl(doc, "path", {
+        d: "M5.3 9.2 4.7 4.6l4.35 2.48A8.7 8.7 0 0 1 12 6.55c1.06 0 2.05.18 2.95.53L19.3 4.6l-.6 4.6c.92 1.06 1.42 2.4 1.42 3.82 0 4-3.5 6.58-8.12 6.58S3.88 17.02 3.88 13.02c0-1.42.5-2.76 1.42-3.82Z",
+        fill: "#FF86C2",
+        stroke: "#D9438E",
+        "stroke-width": "1.35",
+        "stroke-linejoin": "round",
+      })
+    );
+    svg.appendChild(
+      this._makeSvgEl(doc, "path", {
+        d: "m6.15 6.48 1.92 1.1-1.66.94-.26-2.04Zm11.7 0-1.92 1.1 1.66.94.26-2.04Z",
+        fill: "#FFD3E8",
+      })
+    );
+    svg.appendChild(
+      this._makeSvgEl(doc, "circle", { cx: "8.75", cy: "12.45", r: ".95", fill: "#57354A" })
+    );
+    svg.appendChild(
+      this._makeSvgEl(doc, "circle", { cx: "15.25", cy: "12.45", r: ".95", fill: "#57354A" })
+    );
+    svg.appendChild(
+      this._makeSvgEl(doc, "path", {
+        d: "m11.05 14.45.95.72.95-.72",
+        stroke: "#B52F78",
+        "stroke-width": "1.15",
+        "stroke-linecap": "round",
+        "stroke-linejoin": "round",
+      })
+    );
+    svg.appendChild(
+      this._makeSvgEl(doc, "path", {
+        d: "M12 15.2c-.55.82-1.5 1.03-2.27.46M12 15.2c.55.82 1.5 1.03 2.27.46M7.8 14.65l-2.3-.25m2.42 1.22-2.17.47m10.45-1.44 2.3-.25m-2.42 1.22 2.17.47",
+        stroke: "#8F5476",
+        "stroke-width": ".75",
+        "stroke-linecap": "round",
+      })
+    );
+    return svg;
+  },
+
   _makeReaderInfoPanel(doc, reader) {
-    const panel = doc.createElement("div");
+    const panel = this._makeHtmlEl(doc, "div");
     panel.id = this.READER_INFO_ID;
     panel.style.cssText =
       "height:26px;display:flex;align-items:center;box-sizing:border-box;overflow:hidden;" +
@@ -3302,7 +4687,7 @@ var PaperOutline = {
       "background:var(--material-sidepane,rgba(255,255,255,.78));color:var(--fill-primary,#333);";
 
     const makeActionButton = (id, action, label, ariaLabel, isFirst, isLast) => {
-      const button = doc.createElement("button");
+      const button = this._makeHtmlEl(doc, "button");
       button.id = id;
       button.setAttribute("type", "button");
       button.setAttribute("tabindex", "-1");
@@ -3313,12 +4698,10 @@ var PaperOutline = {
         "border:0;border-left:" + (isFirst ? "0" : "1px solid var(--fill-quarternary,#d5d5d5)") + ";" +
         "border-radius:" + (isFirst ? "6px 0 0 6px" : (isLast ? "0 6px 6px 0" : "0")) + ";" +
         "background:transparent;color:var(--accent-blue,#2e7dd1);font-size:11.5px;cursor:pointer;";
-      button.innerHTML =
-        '<svg width="13" height="13" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">' +
-        (action === "copy-pdf"
-          ? '<path d="M3.2 2.2h6l3.6 3.6v7.6c0 .7-.6 1.2-1.2 1.2H3.2c-.7 0-1.2-.6-1.2-1.2v-10c0-.7.6-1.2 1.2-1.2Z" stroke="currentColor" stroke-width="1.25"/><path d="M9.2 2.4v3.4h3.4M4.1 11.9V8.1h1.4c.8 0 1.3.4 1.3 1.1s-.5 1.1-1.3 1.1H4.2M8 11.9V8.1h1c1.2 0 2 .7 2 1.9s-.8 1.9-2 1.9H8Z" stroke="currentColor" stroke-width=".9" stroke-linecap="round" stroke-linejoin="round"/>'
-          : '<rect x="5.2" y="4.8" width="7.3" height="8" rx="1.4" stroke="currentColor" stroke-width="1.35"/><path d="M10.4 4.8V3.6c0-.8-.6-1.4-1.4-1.4H4.1c-.8 0-1.4.6-1.4 1.4v6.1c0 .8.6 1.4 1.4 1.4h1.1" stroke="currentColor" stroke-width="1.35" stroke-linecap="round"/>') +
-        "</svg><span>" + label + "</span>";
+      button.appendChild(this._makeReaderActionIconElement(doc, action));
+      const span = this._makeHtmlEl(doc, "span");
+      span.textContent = label;
+      button.appendChild(span);
       button.addEventListener("mouseenter", () => { if (!button.disabled) button.style.background = "rgba(46,125,209,.10)"; });
       button.addEventListener("mouseleave", () => { button.style.background = "transparent"; });
       return button;
@@ -3340,7 +4723,6 @@ var PaperOutline = {
   _updateReaderInfoPanel(panel, reader) {
     if (!panel) return;
     const text = this._getReaderInfoText(reader);
-    const shown = text || "当前 PDF 无可复制的题录信息";
     const copyInfo = panel.querySelector && panel.querySelector("#" + this.READER_INFO_COPY_ID);
     const copyPdf = panel.querySelector && panel.querySelector("#" + this.READER_PDF_COPY_ID);
     if (copyInfo) {
@@ -3351,7 +4733,7 @@ var PaperOutline = {
       copyInfo.setAttribute("title", text ? "复制信息：" + text : "当前 PDF 无可复制的题录信息");
     }
     if (copyPdf) {
-      const canCopyPdf = !!(reader && reader._item) && this.pref("copyFile", true);
+      const canCopyPdf = !!this._getReaderAttachment(reader) && this.pref("copyFile", true);
       copyPdf.__paperOutlineReader = reader;
       copyPdf.disabled = !canCopyPdf;
       copyPdf.style.opacity = canCopyPdf ? "1" : ".45";
@@ -3468,14 +4850,14 @@ var PaperOutline = {
     );
   },
 
-  // 造一个工具栏按钮：新版粉色小猫图标（醒目）
+  // 造一个工具栏按钮：新版粉色小猫图标（安全 DOM 构造，不使用 innerHTML）
   _makeDespaceButton(doc) {
-    const btn = doc.createElement("button");
+    const btn = this._makeHtmlEl(doc, "button");
     btn.id = this.DESPACE_BTN_ID;
     btn.className = "toolbar-button";
     btn.setAttribute("title", "去除文字空格：点我清理刚复制的文字");
     btn.setAttribute("tabindex", "-1");
-    btn.innerHTML = this._catIconSVG(20);
+    btn.appendChild(this._makeCatIconElement(doc, 20));
     btn.addEventListener("click", (e) => {
       try { e.preventDefault(); e.stopPropagation(); } catch (er) {}
       PaperOutline.cleanClipboardSpaces();
@@ -3511,7 +4893,7 @@ var PaperOutline = {
   // 一键清理：把本 PDF 所有标注里的空格去掉（高亮/下划线的文字 + 任意标注的批注），直接改存标注
   async cleanAllAnnotations(reader) {
     try {
-      const att = reader && reader._item;
+      const att = this._getReaderAttachment(reader);
       if (!att || typeof att.getAnnotations !== "function") {
         this._despaceToast("没找到标注", "请在打开的 PDF 阅读器里使用");
         return;
@@ -3551,7 +4933,7 @@ var PaperOutline = {
     }
   },
 
-  // 在标注栏（注释列表 #annotations）顶部注入「去除全部标注空格」按钮（粉色小猫）
+  // 在标注栏（注释列表 #annotations）顶部注入「去除全部标注空格」按钮（粉色小猫，跟随明暗主题）
   _injectAnnotCleanButton(event) {
     if (!this.pref("despaceButton", true)) return;
     const doc = event && event.doc;
@@ -3559,19 +4941,23 @@ var PaperOutline = {
     if (doc.getElementById(this.ANNOT_BTN_ID)) return; // 幂等
     const list = doc.getElementById("annotations"); // 注释列表容器（切到「注释」标签才有）
     if (!list || !list.parentNode) return;
-    const bar = doc.createElement("div");
+    const bar = this._makeHtmlEl(doc, "div");
     bar.id = this.ANNOT_BTN_ID;
     bar.style.cssText = "display:flex;justify-content:center;padding:7px 8px;box-sizing:border-box;";
-    const btn = doc.createElement("button");
+    const btn = this._makeHtmlEl(doc, "button");
     const PINK = "#ff3d9a"; // 粉色描边 + 粉色小猫
     btn.style.cssText =
       "width:100%;height:32px;padding:0 12px;gap:7px;display:flex;align-items:center;justify-content:center;" +
-      "font-size:13px;font-weight:700;letter-spacing:.5px;color:#000;background:#fff;border:1.5px solid " + PINK + ";" +
-      "border-radius:8px;cursor:pointer;box-shadow:0 1px 4px rgba(255,61,154,.28);";
-    btn.onmouseover = () => { btn.style.background = "#fff0f7"; };
-    btn.onmouseout = () => { btn.style.background = "#fff"; };
+      "font-size:13px;font-weight:700;letter-spacing:.5px;" +
+      "color:var(--fill-primary,CanvasText);background:var(--material-sidepane,Canvas);border:1.5px solid " + PINK + ";" +
+      "border-radius:8px;cursor:pointer;box-shadow:0 1px 4px rgba(255,61,154,.24);";
+    btn.onmouseover = () => { btn.style.background = "rgba(255,61,154,.12)"; };
+    btn.onmouseout = () => { btn.style.background = "var(--material-sidepane,Canvas)"; };
     btn.setAttribute("title", "把本 PDF 所有标注里的空格一次性去除");
-    btn.innerHTML = this._catIconSVG(18) + "<span>去除全部标注空格</span>";
+    btn.appendChild(this._makeCatIconElement(doc, 18));
+    const span = this._makeHtmlEl(doc, "span");
+    span.textContent = "去除全部标注空格";
+    btn.appendChild(span);
     btn.addEventListener("click", (e) => {
       try { e.preventDefault(); e.stopPropagation(); } catch (er) {}
       PaperOutline.cleanAllAnnotations(event.reader);
@@ -3584,24 +4970,26 @@ var PaperOutline = {
   registerDespace() {
     try {
       if (!(Zotero.Reader && typeof Zotero.Reader.registerEventListener === "function")) return;
-      Zotero.Reader.registerEventListener(
-        "renderToolbar",
-        (event) => {
-          if (typeof PaperOutline === "undefined") return;
+      if (!this._despaceToolbarListener) {
+        this._despaceToolbarListener = (event) => {
+          if (typeof PaperOutline === "undefined" || PaperOutline._shuttingDown) return;
           try { PaperOutline._injectDespaceButton(event); } catch (e) { PaperOutline.log("despace btn: " + e); }
           try { PaperOutline._injectReaderInfoPanel(event); } catch (e) { PaperOutline.log("reader info: " + e); }
-        },
-        this.id
-      );
+        };
+        Zotero.Reader.registerEventListener("renderToolbar", this._despaceToolbarListener, this.id);
+      }
       // 标注栏：每次标注渲染时确保「去除全部标注空格」按钮在注释列表顶部
-      Zotero.Reader.registerEventListener(
-        "renderSidebarAnnotationHeader",
-        (event) => {
-          if (typeof PaperOutline === "undefined") return;
+      if (!this._despaceAnnotListener) {
+        this._despaceAnnotListener = (event) => {
+          if (typeof PaperOutline === "undefined" || PaperOutline._shuttingDown) return;
           try { PaperOutline._injectAnnotCleanButton(event); } catch (e) { PaperOutline.log("annot btn: " + e); }
-        },
-        this.id
-      );
+        };
+        Zotero.Reader.registerEventListener(
+          "renderSidebarAnnotationHeader",
+          this._despaceAnnotListener,
+          this.id
+        );
+      }
       // 已打开的阅读器（重装/启用插件时不一定会重渲）→ 直接对其文档注入一次
       try {
         (Zotero.Reader._readers || []).forEach((r) => {
@@ -3621,10 +5009,20 @@ var PaperOutline = {
     }
   },
 
-  // 关闭插件时清理：移除已注入按钮
+  // 关闭插件时清理：注销监听器并移除已注入按钮
   unregisterDespace() {
     try {
-      (Zotero.Reader._readers || []).forEach((r) => {
+      if (Zotero.Reader && typeof Zotero.Reader.unregisterEventListener === "function") {
+        if (this._despaceToolbarListener) {
+          try { Zotero.Reader.unregisterEventListener("renderToolbar", this._despaceToolbarListener); } catch (e) {}
+        }
+        if (this._despaceAnnotListener) {
+          try { Zotero.Reader.unregisterEventListener("renderSidebarAnnotationHeader", this._despaceAnnotListener); } catch (e) {}
+        }
+      }
+      this._despaceToolbarListener = null;
+      this._despaceAnnotListener = null;
+      ((Zotero.Reader && Zotero.Reader._readers) || []).forEach((r) => {
         try {
           const d = r && r._iframeWindow && r._iframeWindow.document;
           if (!d) return;
@@ -3790,7 +5188,7 @@ var PaperOutline = {
           opened = true;
           break;
         }
-        await Zotero.Promise.delay(50 + attempt * 40);
+        await this._sleep(50 + attempt * 40);
       }
       if (!opened) throw new Error("剪贴板正被其他程序占用，请稍后重试");
       try {
@@ -3942,6 +5340,32 @@ var PaperOutline = {
     } catch (err) { PaperOutline.log("_onLibraryCopyKey: " + err); }
   },
 
+  attachCopyFileToWindow(win) {
+    try {
+      if (!win || typeof win.addEventListener !== "function") return;
+      if (!this._copyFileKeyWindows) this._copyFileKeyWindows = new Map();
+      if (this._copyFileKeyWindows.has(win)) return;
+      const handler = (e) => PaperOutline._onLibraryCopyKey(e, win);
+      win.addEventListener("keydown", handler, true);
+      win.__poCopyFileKeyHooked = true;
+      this._copyFileKeyWindows.set(win, handler);
+    } catch (e) {
+      this.log("attachCopyFileToWindow: " + e);
+    }
+  },
+
+  detachCopyFileFromWindow(win) {
+    try {
+      if (!win || !this._copyFileKeyWindows || !this._copyFileKeyWindows.has(win)) return;
+      const handler = this._copyFileKeyWindows.get(win);
+      try { win.removeEventListener("keydown", handler, true); } catch (e) {}
+      try { win.__poCopyFileKeyHooked = false; } catch (e) {}
+      this._copyFileKeyWindows.delete(win);
+    } catch (e) {
+      this.log("detachCopyFileFromWindow: " + e);
+    }
+  },
+
   registerCopyFile() {
     try {
       // ① 阅读器「标签」右键菜单（main/tab）—— 在标签栏上右键标签即可复制其 PDF 文件
@@ -3971,15 +5395,15 @@ var PaperOutline = {
         } catch (e) { this.log("copyfile tab menu: " + e); }
       }
       // （阅读器内右键/Ctrl+C 复制已按需求移除，防与阅读器自身复制冲突；保留「标签右键」与「文库」）
-      // ② 文库主窗口 Ctrl+C
+      // ② 所有已打开的文库主窗口 Ctrl+C（后续新开窗口由 onMainWindowLoad 绑定）
       try {
-        const win = Zotero.getMainWindow();
-        if (win && !win.__poCopyFileKeyHooked) {
-          win.__poCopyFileKeyHooked = true;
-          const handler = (e) => PaperOutline._onLibraryCopyKey(e, win);
-          win.addEventListener("keydown", handler, true);
-          this._copyFileKeyWin = { win, handler };
-        }
+        const wins =
+          Zotero.getMainWindows && typeof Zotero.getMainWindows === "function"
+            ? Zotero.getMainWindows()
+            : Zotero.getMainWindow && Zotero.getMainWindow()
+              ? [Zotero.getMainWindow()]
+              : [];
+        for (const win of wins) this.attachCopyFileToWindow(win);
       } catch (e) {}
       this.log("copyfile registered");
     } catch (e) {
@@ -3994,10 +5418,11 @@ var PaperOutline = {
       }
     } catch (e) {}
     try {
-      if (this._copyFileKeyWin) {
-        this._copyFileKeyWin.win.removeEventListener("keydown", this._copyFileKeyWin.handler, true);
-        try { this._copyFileKeyWin.win.__poCopyFileKeyHooked = false; } catch (e) {}
-        this._copyFileKeyWin = null;
+      if (this._copyFileKeyWindows) {
+        for (const win of [...this._copyFileKeyWindows.keys()]) {
+          this.detachCopyFileFromWindow(win);
+        }
+        this._copyFileKeyWindows.clear();
       }
     } catch (e) {}
   },

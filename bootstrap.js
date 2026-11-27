@@ -1,9 +1,11 @@
 /* global Zotero, Services, ChromeUtils, PaperOutline */
 // ───────────────────────────────────────────────────────────────
-//  Paper Outline GPT —— Zotero 7 bootstrap 入口
+//  Paper Outline GPT —— Zotero 7+ bootstrap 入口
 //  生命周期：install / startup / shutdown / uninstall
 //  + 窗口钩子：onMainWindowLoad / onMainWindowUnload
 // ───────────────────────────────────────────────────────────────
+
+var _prefPaneID = null;
 
 function install() {}
 function uninstall() {}
@@ -18,17 +20,22 @@ async function startup({ id, version, rootURI }) {
   // 载入目录缓存（独立 JSON 文件；首次会从旧 prefs 缓存迁移）
   await PaperOutline._loadCache();
 
-  // 注册「设置」面板（编辑 → 设置 → Paper Outline GPT）
+  // 注册「设置」面板（编辑 → 设置 → Paper Outline）
   // 注意：src 必须用 rootURI 拼成绝对路径（相对路径在 Zotero 7+ 会抛异常）
   try {
-    Zotero.PreferencePanes.register({
+    const paneID = await Zotero.PreferencePanes.register({
+      id: "paper-outline-prefpane",
       pluginID: id,
       src: rootURI + "preferences.xhtml",
       label: "Paper Outline",
+      image: rootURI + "icons/icon.png",
       scripts: [rootURI + "preferences.js"],
       stylesheets: [rootURI + "preferences.css"],
     });
+    _prefPaneID = paneID || "paper-outline-prefpane";
+    PaperOutline._prefPaneID = _prefPaneID;
   } catch (e) {
+    PaperOutline._prefPaneID = "paper-outline-prefpane";
     PaperOutline.log("PreferencePanes.register 失败（不影响主功能）: " + e);
   }
 
@@ -46,25 +53,44 @@ async function startup({ id, version, rootURI }) {
 }
 
 function onMainWindowLoad({ window }) {
-  // 仅 Zotero 7 退化路径需要逐窗口注入；MenuManager 会自动处理新窗口
-  if (typeof PaperOutline !== "undefined" && PaperOutline._usedMenuManager === false) {
+  if (typeof PaperOutline === "undefined") return;
+  try { PaperOutline.attachCopyFileToWindow(window); } catch (e) {}
+  // 仅 Zotero 7 退化路径需要逐窗口注入菜单；MenuManager 会自动处理新窗口
+  if (PaperOutline._usedMenuManager === false) {
     PaperOutline.addToWindow(window);
   }
 }
 
 function onMainWindowUnload({ window }) {
-  if (typeof PaperOutline !== "undefined" && PaperOutline._usedMenuManager === false) {
+  if (typeof PaperOutline === "undefined") return;
+  try { PaperOutline.detachCopyFileFromWindow(window); } catch (e) {}
+  if (PaperOutline._usedMenuManager === false) {
     PaperOutline.removeFromWindow(window);
   }
 }
 
 function shutdown() {
+  if (_prefPaneID) {
+    try {
+      if (Zotero.PreferencePanes && typeof Zotero.PreferencePanes.unregister === "function") {
+        Zotero.PreferencePanes.unregister(_prefPaneID);
+      }
+    } catch (e) {}
+    _prefPaneID = null;
+  }
   if (typeof PaperOutline !== "undefined") {
-    PaperOutline.unregisterMenu();
-    PaperOutline.unregisterAutoObserver();
+    PaperOutline._shuttingDown = true;
+    try { PaperOutline.unregisterMenu(); } catch (e) {}
+    try { PaperOutline.unregisterAuto(); } catch (e) {}
+    try { PaperOutline.unregisterReaderOutline(); } catch (e) {}
     try { PaperOutline.cancelMineruExpiryReminder(); } catch (e) {}
     try { PaperOutline.unregisterDespace(); } catch (e) {}
     try { PaperOutline.unregisterCopyFile(); } catch (e) {}
+    try {
+      if (Zotero && Zotero.PaperOutlineGPT === PaperOutline) {
+        delete Zotero.PaperOutlineGPT;
+      }
+    } catch (e) {}
     // eslint-disable-next-line no-global-assign
     PaperOutline = undefined;
   }

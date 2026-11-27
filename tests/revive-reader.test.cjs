@@ -1,6 +1,7 @@
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const path = require("node:path");
+const test = require("node:test");
 const vm = require("node:vm");
 
 function loadPaperOutline(zotero) {
@@ -10,7 +11,7 @@ function loadPaperOutline(zotero) {
   return context.PaperOutline;
 }
 
-async function testManagedRecoveryMenus() {
+test("MenuManager 注册条目右键与工具/视图重新唤起菜单", async () => {
   const registered = [];
   const zotero = {
     MenuManager: {
@@ -33,9 +34,9 @@ async function testManagedRecoveryMenus() {
     ["main/library/item", "main/menubar/tools", "reader/menubar/view"]
   );
   assert.equal(registered[1].menus[0].label, "🔄 重新唤起 Paper Outline");
-}
+});
 
-async function testRevivesCurrentReaderOnly() {
+test("阅读器标签页激活时仅重新唤起当前 PDF 阅读器", async () => {
   const current = { type: "pdf", _iframeWindow: { document: {}, setTimeout() {} } };
   const background = { type: "pdf", _iframeWindow: { document: {}, setTimeout() {} } };
   const zotero = {
@@ -56,9 +57,9 @@ async function testRevivesCurrentReaderOnly() {
 
   assert.equal(await outline.reviveReaderFeatures(), 1);
   assert.deepEqual(revived, [current]);
-}
+});
 
-async function testRevivesAllReadersFromLibrary() {
+test("文库页激活时重新唤起所有打开的 PDF 阅读器（忽略非 PDF）", async () => {
   const first = { type: "pdf" };
   const second = { type: "pdf" };
   const zotero = {
@@ -76,9 +77,9 @@ async function testRevivesAllReadersFromLibrary() {
 
   assert.equal(await outline.reviveReaderFeatures(), 2);
   assert.deepEqual(revived, [first, second]);
-}
+});
 
-async function testRevivesDetachedReaderFromItsOwnMenu() {
+test("独立阅读器窗口触发重新唤起时仅命中该独立窗口", async () => {
   const detachedWindow = {};
   const detached = { type: "pdf", _window: detachedWindow };
   const tabReader = { type: "pdf", tabID: "reader-tab", _window: {} };
@@ -91,15 +92,4 @@ async function testRevivesDetachedReaderFromItsOwnMenu() {
   const targets = outline._getReaderReviveTargets({ target: { ownerGlobal: detachedWindow } });
   assert.equal(targets.length, 1);
   assert.equal(targets[0], detached);
-}
-
-Promise.resolve()
-  .then(testManagedRecoveryMenus)
-  .then(testRevivesCurrentReaderOnly)
-  .then(testRevivesAllReadersFromLibrary)
-  .then(testRevivesDetachedReaderFromItsOwnMenu)
-  .then(() => console.log("revive-reader tests passed"))
-  .catch((error) => {
-    console.error(error);
-    process.exitCode = 1;
-  });
+});

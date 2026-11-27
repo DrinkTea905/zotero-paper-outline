@@ -14,12 +14,21 @@ function loadPaperOutline(options = {}) {
       set(name, value) {
         prefs[name.replace("extensions.paperoutline.", "")] = value;
       },
+      clear(name) {
+        delete prefs[name.replace("extensions.paperoutline.", "")];
+      },
     },
-    HTTP: { request: options.request || (async () => { throw new Error("unexpected request"); }) },
+    HTTP: {
+      request:
+        options.request ||
+        (async () => {
+          throw new Error("unexpected request");
+        }),
+    },
     debug() {},
   };
   const source = fs.readFileSync(path.join(__dirname, "..", "paperOutline.js"), "utf8");
-  const context = vm.createContext({ Zotero: zotero, console, Map, Set });
+  const context = vm.createContext({ Zotero: zotero, console, Map, Set, URL });
   vm.runInContext(source, context, { filename: "paperOutline.js" });
   return { outline: context.PaperOutline, prefs };
 }
@@ -34,7 +43,11 @@ test("MiMo 复用现有 provider 解析与模型发现", async () => {
     request: async (method, url, options) => {
       requests.push({ method, url, options });
       if (method === "GET") {
-        return { responseText: JSON.stringify({ data: [{ id: "mimo-v2.5-pro" }, { id: "mimo-v2.5" }] }) };
+        return {
+          responseText: JSON.stringify({
+            data: [{ id: "mimo-v2.6-pro" }, { id: "mimo-v2.6-flash" }],
+          }),
+        };
       }
       return {
         responseText: JSON.stringify({ choices: [{ message: { content: "OK" } }] }),
@@ -44,7 +57,7 @@ test("MiMo 复用现有 provider 解析与模型发现", async () => {
 
   const defaults = outline._resolveAI({ provider: "mimo", key: "secret", url: "", model: "" });
   assert.equal(defaults.url, "https://api.xiaomimimo.com/v1/chat/completions");
-  assert.equal(defaults.model, "mimo-v2.5");
+  assert.equal(defaults.model, "mimo-v2.6-flash");
   assert.equal(defaults.modelIsCustom, false);
 
   const result = await outline.testConnection({
@@ -53,20 +66,20 @@ test("MiMo 复用现有 provider 解析与模型发现", async () => {
     url: "",
     model: "",
   });
-  assert.equal(result.model, "mimo-v2.5");
+  assert.equal(result.model, "mimo-v2.6-flash");
   assert.equal(requests[0].method, "GET");
   assert.equal(requests[0].url, "https://api.xiaomimimo.com/v1/models");
   assert.equal(requests[0].options.headers.Authorization, "Bearer secret");
   assert.equal(requests[1].method, "POST");
   const payload = JSON.parse(requests[1].options.body);
-  assert.equal(payload.model, "mimo-v2.5");
+  assert.equal(payload.model, "mimo-v2.6-flash");
   assert.deepEqual(payload.thinking, { type: "disabled" });
-  assert.equal(payload.max_completion_tokens, 32);
+  assert.equal(payload.max_completion_tokens, 64);
   assert.equal(Object.hasOwn(payload, "max_tokens"), false);
 
   assert.equal(
-    outline._chooseAvailableModel("mimo", ["mimo-v2.5-pro", "mimo-voiceclone-7b"], "mimo-v2.5"),
-    "mimo-v2.5-pro"
+    outline._chooseAvailableModel("mimo", ["mimo-v2.6-pro", "mimo-voiceclone-7b"], "mimo-v2.6-flash"),
+    "mimo-v2.6-pro"
   );
 
   const overridden = outline._resolveAI({
@@ -88,7 +101,7 @@ test("深度思考为插件级开关，仅对声明支持的 provider 生效", a
     return { choices: [{ message: { content: "ok" } }] };
   };
 
-  for (const provider of ["mimo", "deepseek", "openai"]) {
+  for (const provider of ["mimo", "deepseek", "siliconflow"]) {
     const config = outline._resolveAI({ provider, key: "k", url: "", model: "" });
     await outline.callAI("system", "user", { task: "summary", json: false, config });
   }
@@ -116,8 +129,13 @@ test("整篇总结按模型上下文动态计算，未知模型回退 60000", ()
   assert.ok(shortPromptLimit < 1048576);
   assert.ok(longPromptLimit < shortPromptLimit);
 
-  const openai = outline._resolveAI({ provider: "openai", key: "k", url: "", model: "" });
-  assert.equal(outline._contextWindowTokens(openai), 128000);
+  const deepseek = outline._resolveAI({ provider: "deepseek", key: "k", url: "", model: "" });
+  assert.equal(deepseek.model, "deepseek-flash");
+  assert.equal(outline._contextWindowTokens(deepseek), 1048576);
+
+  const moonshot = outline._resolveAI({ provider: "moonshot", key: "k", url: "", model: "" });
+  assert.equal(moonshot.model, "kimi-k2.6");
+  assert.equal(outline._contextWindowTokens(moonshot), 262144);
 
   const unknown = outline._resolveAI({
     provider: "custom",
@@ -128,14 +146,20 @@ test("整篇总结按模型上下文动态计算，未知模型回退 60000", ()
   assert.equal(outline._contextWindowTokens(unknown), 0);
   assert.equal(outline._summaryInputLimit(unknown, "system", "prefix"), 60000);
 
-  const moonshot = outline._resolveAI({ provider: "moonshot", key: "k", url: "", model: "" });
+  const moonshot8k = outline._resolveAI({
+    provider: "moonshot",
+    key: "k",
+    url: "",
+    model: "moonshot-v1-8k",
+  });
+  assert.equal(outline._contextWindowTokens(moonshot8k), 8192);
   assert.throws(
-    () => outline._summaryInputLimit(moonshot, "x".repeat(9000), "prefix"),
+    () => outline._summaryInputLimit(moonshot8k, "字".repeat(9000), "prefix"),
     /总结提示词过长/
   );
 });
 
-test("mimo-v2.5 总结不再把 60000 字符作为固定截断点", async () => {
+test("mimo-v2.6-flash 总结不再把 60000 字符作为固定截断点", async () => {
   const { outline } = loadPaperOutline();
   const config = outline._resolveAI({ provider: "mimo", key: "k", url: "", model: "" });
   outline._prepareAI = async () => config;
@@ -157,8 +181,12 @@ test("mimo-v2.5 总结不再把 60000 字符作为固定截断点", async () => 
 
 test("超出未知模型 fallback 时等距保留全文各位置", () => {
   const { outline } = loadPaperOutline();
-  const fullText = "A".repeat(40000) + "B".repeat(40000) + "C".repeat(40000) +
-    "D".repeat(40000) + "E".repeat(40000);
+  const fullText =
+    "A".repeat(40000) +
+    "B".repeat(40000) +
+    "C".repeat(40000) +
+    "D".repeat(40000) +
+    "E".repeat(40000);
   const selected = outline._textForSummary(fullText, 60000);
   assert.ok(selected.length <= 60000);
   assert.ok(selected.length > 59000);
@@ -175,16 +203,19 @@ test("MiMo 目录仍走统一 JSON 请求与解析链", async () => {
   outline._post = async (url, headers, payload) => {
     sentPayload = plain(payload);
     return {
-      choices: [{ message: { content: '{"outline":[{"level":1,"title":"一、引言","summary":"问题"}]}' } }],
+      choices: [
+        {
+          message: {
+            content: '{"outline":[{"level":1,"title":"一、引言","rawTitle":"一、引言","summary":"问题"}]}',
+          },
+        },
+      ],
     };
   };
-  const result = await outline.generateOutline(
-    { key: "ITEM" },
-    null,
-    { fullText: "一、引言\n正文" }
-  );
+  const result = await outline.generateOutline({ key: "ITEM" }, null, { fullText: "一、引言\n正文" });
   assert.equal(result.length, 1);
   assert.equal(result[0].title, "一、引言");
+  assert.equal(result[0].rawTitle, "一、引言");
   assert.deepEqual(sentPayload.response_format, { type: "json_object" });
   assert.deepEqual(sentPayload.thinking, { type: "disabled" });
 });
@@ -193,7 +224,7 @@ test("模型刷新重试仍保留 JSON 与深度思考设置", async () => {
   const { outline } = loadPaperOutline({ prefs: { deepThinking: false } });
   const initial = outline._resolveAI({ provider: "mimo", key: "k", url: "", model: "" });
   const sent = [];
-  outline._prepareAI = async () => ({ ...initial, model: "mimo-v2.5-pro" });
+  outline._prepareAI = async () => ({ ...initial, model: "mimo-v2.6-pro" });
   outline._post = async (url, headers, payload) => {
     sent.push(plain(payload));
     if (sent.length === 1) {
@@ -207,7 +238,7 @@ test("模型刷新重试仍保留 JSON 与深度思考设置", async () => {
 
   await outline.callAI("system", "user", { task: "outline", config: initial });
   assert.equal(sent.length, 2);
-  assert.equal(sent[1].model, "mimo-v2.5-pro");
+  assert.equal(sent[1].model, "mimo-v2.6-pro");
   assert.deepEqual(sent[1].response_format, { type: "json_object" });
   assert.deepEqual(sent[1].thinking, { type: "disabled" });
 });
@@ -237,7 +268,7 @@ test("旧全局 AI 配置只迁移到当前 provider 且不覆盖已存值", () 
   assert.equal(prefs["providerConfig.mimo.apiKey"], "");
 });
 
-test("运行时按 provider 读取 URL、Key 和模型，不回退到别家全局值", () => {
+test("运行时按 provider 读取 URL、Key 和模型，不回退到别家全局值，且移除 openai 预设", () => {
   const { outline, prefs } = loadPaperOutline({
     prefs: {
       provider: "deepseek",
@@ -247,23 +278,35 @@ test("运行时按 provider 读取 URL、Key 和模型，不回退到别家全�
       model: "wrong-global-model",
       "providerConfig.deepseek.apiUrl": "https://api.deepseek.com/chat/completions",
       "providerConfig.deepseek.apiKey": "ds-key",
-      "providerConfig.deepseek.model": "deepseek-v4-flash",
+      "providerConfig.deepseek.model": "deepseek-flash",
       "providerConfig.mimo.apiUrl": "https://api.xiaomimimo.com/v1/chat/completions",
       "providerConfig.mimo.apiKey": "mimo-key",
-      "providerConfig.mimo.model": "mimo-v2.5",
+      "providerConfig.mimo.model": "mimo-v2.6-flash",
       "providerConfig.custom.apiUrl": "https://custom.example/v1/chat/completions",
       "providerConfig.custom.apiKey": "custom-key",
       "providerConfig.custom.model": "custom-model",
     },
   });
 
+  assert.deepEqual(Object.keys(outline.PROVIDERS), [
+    "deepseek",
+    "mimo",
+    "moonshot",
+    "zhipu",
+    "qwen",
+    "siliconflow",
+    "ollama",
+    "custom",
+  ]);
+  assert.equal(Object.hasOwn(outline.PROVIDERS, "openai"), false);
+
   const deepseek = outline._resolveAI({ provider: "deepseek" });
   const mimo = outline._resolveAI({ provider: "mimo" });
   const custom = outline._resolveAI({ provider: "custom" });
   assert.equal(deepseek.key, "ds-key");
-  assert.equal(deepseek.model, "deepseek-v4-flash");
+  assert.equal(deepseek.model, "deepseek-flash");
   assert.equal(mimo.key, "mimo-key");
-  assert.equal(mimo.model, "mimo-v2.5");
+  assert.equal(mimo.model, "mimo-v2.6-flash");
   assert.equal(custom.url, "https://custom.example/v1/chat/completions");
   assert.equal(custom.key, "custom-key");
   assert.equal(custom.model, "custom-model");
@@ -275,15 +318,25 @@ test("运行时按 provider 读取 URL、Key 和模型，不回退到别家全�
   prefs.provider = "custom";
   assert.equal(outline._hasRequiredAIKey(), true);
 
-  const untouched = outline._resolveAI({ provider: "openai" });
+  const untouched = outline._resolveAI({ provider: "zhipu" });
   assert.equal(untouched.key, "");
-  assert.equal(untouched.url, "https://api.openai.com/v1/chat/completions");
-  assert.equal(untouched.model, "gpt-4o-mini");
+  assert.equal(untouched.url, "https://open.bigmodel.cn/api/paas/v4/chat/completions");
+  assert.equal(untouched.model, "glm-4.7-flash");
 });
 
-test("设置页与默认偏好暴露 MiMo 和通用深度思考开关", () => {
+test("设置页与默认偏好暴露国内 8 服务商、深度思考开关与 rawTitle 提示词", () => {
   const root = path.join(__dirname, "..");
-  assert.match(fs.readFileSync(path.join(root, "preferences.xhtml"), "utf8"), /value="mimo"/);
-  assert.match(fs.readFileSync(path.join(root, "preferences.js"), "utf8"), /paper-outline-deep-thinking/);
-  assert.match(fs.readFileSync(path.join(root, "prefs.js"), "utf8"), /deepThinking", false/);
+  const xhtml = fs.readFileSync(path.join(root, "preferences.xhtml"), "utf8");
+  const prefsJs = fs.readFileSync(path.join(root, "prefs.js"), "utf8");
+  const prefsUiJs = fs.readFileSync(path.join(root, "preferences.js"), "utf8");
+
+  for (const p of ["deepseek", "mimo", "moonshot", "zhipu", "qwen", "siliconflow", "ollama", "custom"]) {
+    assert.match(xhtml, new RegExp(`value="${p}"`));
+  }
+  assert.doesNotMatch(xhtml, /value="openai"/);
+  assert.match(prefsUiJs, /paper-outline-deep-thinking/);
+  assert.match(prefsJs, /deepThinking", false/);
+  assert.match(prefsJs, /rawTitle/);
+  assert.match(prefsJs, /trimReferences", true/);
+  assert.match(prefsJs, /summaryPreset", "humanities"/);
 });

@@ -29,7 +29,6 @@
                   preference="extensions.paperoutline.provider">
           <menupopup>
             <menuitem value="deepseek" label="DeepSeek（默认）"/>
-            <menuitem value="openai" label="OpenAI"/>
             <menuitem value="mimo" label="Xiaomi MiMo"/>
             <menuitem value="moonshot" label="月之暗面 Kimi"/>
             <menuitem value="zhipu" label="智谱 GLM"/>
@@ -42,23 +41,45 @@
 
         <html:label class="paper-outline-form-label" for="paper-outline-api-key">API Key</html:label>
         <html:div class="paper-outline-field-stack">
-          <html:input id="paper-outline-api-key"
-                      type="password"
-                      autocomplete="off"
-                      placeholder="粘贴服务商提供的 API Key"/>
+          <html:div class="paper-outline-secret-row">
+            <html:input id="paper-outline-api-key"
+                        type="password"
+                        autocomplete="off"
+                        placeholder="粘贴服务商提供的 API Key"/>
+            <html:button id="po-api-key-toggle"
+                         type="button"
+                         class="paper-outline-secret-toggle"
+                         aria-pressed="false"
+                         title="显示或隐藏 API Key">显示</html:button>
+          </html:div>
           <html:p id="paper-outline-key-hint" class="paper-outline-hint">按服务商分别保存在本机 Zotero 设置中。</html:p>
         </html:div>
 
         <html:label class="paper-outline-form-label" for="paper-outline-model">模型（可选）</html:label>
         <html:div class="paper-outline-field-stack">
-          <html:input id="paper-outline-model"
-                      type="text"
-                      placeholder="留空自动选择当前可用模型"/>
-          <html:p id="paper-outline-model-hint" class="paper-outline-hint">留空时自动查询服务商当前可用模型；查询失败时才使用内置兜底。</html:p>
+          <html:div class="paper-outline-input-action-row">
+            <html:input id="paper-outline-model"
+                        type="text"
+                        placeholder="留空 = 自动获取当前服务商最新推荐模型（升级不失效）"/>
+            <button id="po-fetch-models-btn"
+                    label="拉取模型"
+                    oncommand="window.PaperOutlinePrefsUI.fetchModels()"/>
+          </html:div>
+          <html:select id="po-model-picker"
+                       class="paper-outline-model-picker"
+                       hidden="hidden"
+                       aria-label="服务商可用模型列表"></html:select>
+          <html:p id="po-model-fetch-status"
+                  class="paper-outline-fetch-status"
+                  data-state="idle"
+                  role="status"
+                  aria-live="polite"
+                  hidden="hidden"></html:p>
+          <html:p id="paper-outline-model-hint" class="paper-outline-hint">留空 = 自动获取当前服务商最新推荐模型（升级不失效）；也可点击右侧「拉取模型」手动选择。</html:p>
         </html:div>
 
         <html:span class="paper-outline-form-label">深度思考</html:span>
-        <html:div class="paper-outline-toggle-item paper-outline-inline-toggle">
+        <html:div id="paper-outline-deep-thinking-row" class="paper-outline-toggle-item paper-outline-inline-toggle">
           <html:input id="paper-outline-deep-thinking"
                       class="paper-outline-toggle-control"
                       type="checkbox"
@@ -67,7 +88,7 @@
             <html:label for="paper-outline-deep-thinking"
                         id="paper-outline-deep-thinking-title"
                         class="paper-outline-toggle-title">启用深度思考</html:label>
-            <html:p class="paper-outline-toggle-desc">默认关闭；仅对声明支持该参数的内置服务商生效。</html:p>
+            <html:p id="paper-outline-deep-thinking-desc" class="paper-outline-toggle-desc">默认关闭；仅对声明支持该参数的内置服务商生效。</html:p>
           </html:div>
         </html:div>
       </html:div>
@@ -124,11 +145,18 @@
       <html:div class="paper-outline-form-grid paper-outline-mineru-form">
         <html:label class="paper-outline-form-label" for="paper-outline-mineru-token">MinerU Token</html:label>
         <html:div class="paper-outline-field-stack">
-          <html:input id="paper-outline-mineru-token"
-                      type="password"
-                      autocomplete="off"
-                      placeholder="粘贴从 MinerU 获取的 Token"
-                      preference="extensions.paperoutline.mineruToken"/>
+          <html:div class="paper-outline-secret-row">
+            <html:input id="paper-outline-mineru-token"
+                        type="password"
+                        autocomplete="off"
+                        placeholder="粘贴从 MinerU 获取的 Token"
+                        preference="extensions.paperoutline.mineruToken"/>
+            <html:button id="po-mineru-token-toggle"
+                         type="button"
+                         class="paper-outline-secret-toggle"
+                         aria-pressed="false"
+                         title="显示或隐藏 MinerU Token">显示</html:button>
+          </html:div>
           <html:p class="paper-outline-hint">
             仅保存在本机 Zotero 设置中。MinerU Token 有效期为 90 天，到期后需要重新创建。
           </html:p>
@@ -220,7 +248,7 @@
           <html:h2 id="paper-outline-output-heading" class="paper-outline-card-title">
             <html:span class="paper-outline-step">4</html:span>生成偏好
           </html:h2>
-          <html:p class="paper-outline-card-desc">控制目录的详细程度；提示词模板仅在需要定制时修改。</html:p>
+          <html:p class="paper-outline-card-desc">控制目录的详细程度与总结风格；提示词模板可按学科预设切换或自由定制。</html:p>
         </html:div>
       </html:div>
 
@@ -243,7 +271,7 @@
         <html:summary>提示词模板</html:summary>
         <html:div class="paper-outline-details-body">
           <html:div class="paper-outline-prompt-toolbar">
-            <html:p class="paper-outline-hint">可以直接修改；需要重新开始时，可一键恢复目录与总结的内置提示词。</html:p>
+            <html:p class="paper-outline-hint">可以直接修改；点击「恢复默认」将恢复目录默认提示词，并按当前所选预设恢复总结提示词。</html:p>
             <button id="paper-outline-reset-prompts"
                     label="恢复默认"
                     oncommand="window.PaperOutlinePrefsUI.restoreDefaultPrompts()"/>
@@ -260,6 +288,19 @@
                            preference="extensions.paperoutline.prompt"></html:textarea>
           </html:div>
           <html:div class="paper-outline-prompt-block">
+            <html:div class="paper-outline-preset-row">
+              <html:label class="paper-outline-prompt-label paper-outline-preset-label" for="po-summary-preset">总结模板预设</html:label>
+              <menulist id="po-summary-preset"
+                        native="true"
+                        preference="extensions.paperoutline.summaryPreset">
+                <menupopup>
+                  <menuitem value="general" label="通用学术"/>
+                  <menuitem value="humanities" label="人文社科 / 法史（经典）"/>
+                  <menuitem value="stem" label="理工 / 实验实证"/>
+                  <menuitem value="brief" label="极简速览"/>
+                </menupopup>
+              </menulist>
+            </html:div>
             <html:label class="paper-outline-prompt-label" for="paper-outline-summary-prompt">总结提示词</html:label>
             <html:textarea id="paper-outline-summary-prompt"
                            class="paper-outline-prompt"
@@ -340,7 +381,19 @@
             </html:div>
           </html:div>
 
-          <html:div class="paper-outline-toggle-list" style="margin-top:16px;">
+          <html:div class="paper-outline-toggle-list paper-outline-advanced-toggles">
+            <html:div class="paper-outline-toggle-item">
+              <html:input id="paper-outline-trim-references"
+                          class="paper-outline-toggle-control"
+                          type="checkbox"
+                          aria-labelledby="paper-outline-trim-references-title"/>
+              <html:div class="paper-outline-toggle-copy">
+                <html:label for="paper-outline-trim-references"
+                            id="paper-outline-trim-references-title"
+                            class="paper-outline-toggle-title">AI 处理前自动裁掉文末参考文献（省 Token）</html:label>
+                <html:p class="paper-outline-toggle-desc">自动识别并裁去文末参考文献列表，降低费用并让更多正文进入上下文窗口。</html:p>
+              </html:div>
+            </html:div>
             <html:div class="paper-outline-toggle-item">
               <html:input id="paper-outline-save-as-note"
                           class="paper-outline-toggle-control"
@@ -357,11 +410,16 @@
 
           <html:div class="paper-outline-danger-row">
             <html:div>
-              <html:p class="paper-outline-toggle-title">目录缓存</html:p>
-              <html:p class="paper-outline-toggle-desc">只删除插件生成的目录缓存，不删除 PDF、文献条目或总结笔记。</html:p>
+              <html:p class="paper-outline-toggle-title">本地缓存</html:p>
+              <html:p class="paper-outline-toggle-desc">只删除插件生成的目录或扫描 OCR 缓存，不删除 PDF、文献条目或总结笔记。</html:p>
             </html:div>
-            <button label="清空目录缓存"
-                    oncommand="Zotero.PaperOutlineGPT &amp;&amp; Zotero.PaperOutlineGPT.clearAllCacheUI()"/>
+            <html:div class="paper-outline-danger-actions">
+              <button label="清空目录缓存"
+                      oncommand="Zotero.PaperOutlineGPT &amp;&amp; Zotero.PaperOutlineGPT.clearAllCacheUI()"/>
+              <button id="po-clear-mineru-cache-btn"
+                      label="清除扫描 OCR 缓存"
+                      oncommand="window.PaperOutlinePrefsUI.clearMineruCache()"/>
+            </html:div>
           </html:div>
         </html:div>
       </html:details>
@@ -373,24 +431,26 @@
       <html:details>
         <html:summary class="paper-outline-card-title">使用帮助</html:summary>
         <html:div class="paper-outline-help paper-outline-details-body">
-          <html:h3>第一次使用</html:h3>
+          <html:h3>第一次使用与模型选择</html:h3>
           <html:ol>
-            <html:li>选择 AI 服务商，粘贴 API Key；使用本地 Ollama 时无需 Key。</html:li>
-            <html:li>点击“测试连接”，看到绿色的“连接成功”后再开始生成。</html:li>
-            <html:li>如需处理扫描论文，在“识别扫描 PDF”中设置 MinerU Token。</html:li>
-            <html:li>保持“自动处理”开启，之后把带 PDF 的文献存入 Zotero 即可。</html:li>
+            <html:li>选择国内主力 AI 服务商（默认 DeepSeek）或本地 Ollama / 自定义服务，粘贴 API Key；每个服务商的密钥、接口地址和模型都会独立保存，切换时自动恢复。</html:li>
+            <html:li><html:strong>自动追新与拉取模型</html:strong>：模型输入框留空即可自动获取当前服务商最新推荐模型，官方升级模型名不会失效；也可点击右侧「拉取模型」实时拉取列表并手动挑选。</html:li>
+            <html:li><html:strong>深度思考开关</html:strong>：默认关闭；对支持该参数的内置服务商开启后，总结与目录分析更深入，耗时也会略微增加。</html:li>
+            <html:li>点击「测试连接」，看到绿色的「连接成功」即可开始生成；扫描 PDF 可在卡片 2 设置 MinerU Token。</html:li>
           </html:ol>
 
-          <html:h3>手动生成</html:h3>
+          <html:h3>生成、模板与阅读器功能</html:h3>
           <html:ul>
-            <html:li>文库：选中一篇或多篇文献，右键选择“AI 整篇总结”或“AI 生成目录”。</html:li>
-            <html:li>阅读器：打开 PDF，在左侧“大纲”栏点击“生成目录”。</html:li>
+            <html:li><html:strong>自动与手动生成</html:strong>：保持「自动处理」开启，文献入库自动生成；也可在文库中右键选择「AI 整篇总结」或「AI 生成目录」，或在阅读器左侧大纲栏手动触发。</html:li>
+            <html:li><html:strong>多学科总结模板</html:strong>：在「生成偏好 → 提示词模板」中可一键切换通用学术、人文社科 / 法史、理工 / 实验实证、极简速览 4 套预设。</html:li>
+            <html:li><html:strong>大纲摘要展开与顶部快捷工具</html:strong>：阅读器大纲栏支持点击展开/收起各章节核心摘要；顶部工具栏支持一键复制文献信息、复制 PDF 文件及清理中文复制空格。</html:li>
+            <html:li><html:strong>重新唤起 Paper Outline</html:strong>：若阅读器切换标签后大纲栏或工具按钮未出现，可在 Zotero 顶部「工具」菜单或阅读器「视图」菜单点击「重新唤起 Paper Outline」。</html:li>
           </html:ul>
 
           <html:h3>没有生成结果？</html:h3>
           <html:ul>
-            <html:li>先重新测试连接；错误信息会提示 Key、余额、模型名或接口地址问题。</html:li>
-            <html:li>扫描 PDF 没有可读取的文字；设置 MinerU 后，插件可以先识别文字再继续生成。</html:li>
+            <html:li>先点击「测试连接」排查密钥、余额、模型名或接口地址；若原手动填写的模型名下线，清空模型栏即可恢复自动追新。</html:li>
+            <html:li>扫描 PDF 没有可读取的文字层；配置 MinerU 后，插件会先识别文字并缓存 OCR 结果，后续重新生成无需重复上传。</html:li>
             <html:li>MinerU Token 有效期为 90 天；插件会记录保存时间，并在临近到期时提醒更换。</html:li>
             <html:li>目录会自动缓存，重新打开同一篇 PDF 时无需重复生成。</html:li>
           </html:ul>

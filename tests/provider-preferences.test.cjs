@@ -10,11 +10,38 @@ class MockElement {
     this.checked = false;
     this.disabled = false;
     this.open = false;
+    this.hidden = false;
+    this.type = "password";
     this.dataset = {};
     this.className = "";
     this.textContent = "";
     this.label = "";
     this.listeners = {};
+    this.children = [];
+    this.attributes = {};
+  }
+
+  get firstChild() {
+    return this.children[0] || null;
+  }
+
+  appendChild(child) {
+    this.children.push(child);
+    return child;
+  }
+
+  removeChild(child) {
+    const idx = this.children.indexOf(child);
+    if (idx >= 0) this.children.splice(idx, 1);
+    return child;
+  }
+
+  setAttribute(name, value) {
+    this.attributes[name] = String(value);
+  }
+
+  getAttribute(name) {
+    return this.attributes[name] || null;
   }
 
   addEventListener(type, listener) {
@@ -43,7 +70,11 @@ function loadPreferencesUI() {
     "paper-outline-key-hint": new MockElement(),
     "paper-outline-api-details": new MockElement(),
     "paper-outline-deep-thinking": new MockElement(),
+    "paper-outline-deep-thinking-desc": new MockElement(),
     "paper-outline-test-status": new MockElement(),
+    "po-model-picker": new MockElement(),
+    "po-model-fetch-status": new MockElement(),
+    "po-fetch-models-btn": new MockElement(),
   };
   const prefs = {
     "extensions.paperoutline.provider": "deepseek",
@@ -54,12 +85,12 @@ function loadPreferencesUI() {
     deepseek: {
       apiUrl: "https://api.deepseek.com/chat/completions",
       apiKey: "ds-key",
-      model: "deepseek-v4-flash",
+      model: "deepseek-flash",
     },
     mimo: {
       apiUrl: "https://api.xiaomimimo.com/v1/chat/completions",
       apiKey: "mimo-key",
-      model: "mimo-v2.5",
+      model: "mimo-v2.6-flash",
     },
   };
   let tested = null;
@@ -82,21 +113,42 @@ function loadPreferencesUI() {
     },
     async testConnection(options) {
       tested = { ...options };
-      return { provider: options.provider, label: options.provider, model: options.model, elapsed: 1 };
+      return {
+        provider: options.provider,
+        label: options.provider,
+        model: options.model,
+        elapsed: 1,
+      };
     },
   };
   const Zotero = {
     PaperOutlineGPT: api,
     Prefs: {
-      get(name) { return prefs[name]; },
-      set(name, value) { prefs[name] = value; },
+      get(name) {
+        return prefs[name];
+      },
+      set(name, value) {
+        prefs[name] = value;
+      },
     },
     launchURL() {},
   };
-  const document = { getElementById: (id) => elements[id] || null };
+  const document = {
+    getElementById: (id) => elements[id] || null,
+    createElementNS: (_ns, tag) => new MockElement(tag),
+  };
   const window = { alert() {}, confirm: () => true };
   const source = fs.readFileSync(path.join(__dirname, "..", "preferences.js"), "utf8");
-  const context = vm.createContext({ Zotero, document, window, Event: class Event { constructor(type) { this.type = type; } } });
+  const context = vm.createContext({
+    Zotero,
+    document,
+    window,
+    Event: class Event {
+      constructor(type) {
+        this.type = type;
+      }
+    },
+  });
   vm.runInContext(source, context, { filename: "preferences.js" });
   return {
     ui: context.window.PaperOutlinePrefsUI,
@@ -112,7 +164,7 @@ test("切换 provider 时分别保存并恢复 URL、Key 和模型", async () =>
   ui.init();
 
   assert.equal(elements["paper-outline-api-key"].value, "ds-key");
-  assert.equal(elements["paper-outline-model"].value, "deepseek-v4-flash");
+  assert.equal(elements["paper-outline-model"].value, "deepseek-flash");
   assert.equal(elements["paper-outline-api-url"].value, "https://api.deepseek.com/chat/completions");
 
   elements["paper-outline-api-key"].value = "ds-key-updated";
@@ -126,11 +178,11 @@ test("切换 provider 时分别保存并恢复 URL、Key 和模型", async () =>
   assert.equal(configs.deepseek.model, "deepseek-custom");
   assert.equal(configs.deepseek.apiUrl, "https://ds-proxy.example/v1/chat/completions");
   assert.equal(elements["paper-outline-api-key"].value, "mimo-key");
-  assert.equal(elements["paper-outline-model"].value, "mimo-v2.5");
+  assert.equal(elements["paper-outline-model"].value, "mimo-v2.6-flash");
   assert.equal(elements["paper-outline-api-url"].value, "https://api.xiaomimimo.com/v1/chat/completions");
 
   elements["paper-outline-api-key"].value = "mimo-key-updated";
-  elements["paper-outline-model"].value = "mimo-v2.5-pro";
+  elements["paper-outline-model"].value = "mimo-v2.6-pro";
   elements["paper-outline-api-key"].trigger("input");
   elements["paper-outline-provider"].value = "deepseek";
   elements["paper-outline-provider"].trigger("command");
@@ -141,13 +193,13 @@ test("切换 provider 时分别保存并恢复 URL、Key 和模型", async () =>
   elements["paper-outline-provider"].value = "mimo";
   elements["paper-outline-provider"].trigger("command");
   assert.equal(elements["paper-outline-api-key"].value, "mimo-key-updated");
-  assert.equal(elements["paper-outline-model"].value, "mimo-v2.5-pro");
+  assert.equal(elements["paper-outline-model"].value, "mimo-v2.6-pro");
   assert.equal(prefs["extensions.paperoutline.apiKey"], "mimo-key-updated");
 
   await ui.testConnection();
   assert.equal(tested().provider, "mimo");
   assert.equal(tested().key, "mimo-key-updated");
-  assert.equal(tested().model, "mimo-v2.5-pro");
+  assert.equal(tested().model, "mimo-v2.6-pro");
   assert.equal(tested().url, "https://api.xiaomimimo.com/v1/chat/completions");
 
   elements["paper-outline-api-key"].value = "";
@@ -163,7 +215,7 @@ test("切换 provider 时分别保存并恢复 URL、Key 和模型", async () =>
   assert.equal(elements["paper-outline-api-url"].value, "");
 });
 
-test("深度思考位于模型下方，三个 provider 字段不再直接绑定全局偏好", () => {
+test("深度思考位于模型下方，三个 provider 字段不再直接绑定全局偏好，且服务商为国内 8 项", () => {
   const xhtml = fs.readFileSync(path.join(__dirname, "..", "preferences.xhtml"), "utf8");
   const modelIndex = xhtml.indexOf('id="paper-outline-model"');
   const thinkingIndex = xhtml.indexOf('id="paper-outline-deep-thinking"');
@@ -172,4 +224,5 @@ test("深度思考位于模型下方，三个 provider 字段不再直接绑定�
   assert.ok(thinkingIndex < detailsIndex);
   assert.equal((xhtml.match(/id="paper-outline-deep-thinking"/g) || []).length, 1);
   assert.doesNotMatch(xhtml, /preference="extensions\.paperoutline\.(?:apiKey|apiUrl|model)"/);
+  assert.doesNotMatch(xhtml, /value="openai"/);
 });
