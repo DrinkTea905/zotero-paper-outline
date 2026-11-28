@@ -1,7 +1,7 @@
 {
   "manifest_version": 2,
   "name": "Paper Outline",
-  "version": "1.8.0",
+  "version": "1.8.1",
   "description": "用 AI 为论文自动生成整篇总结（支持多学科模板、存笔记）与带页码的层级目录、逐节摘要（显示在阅读器大纲栏、点击跳转、支持展开摘要与复制 Markdown）。扫描 PDF 可通过 MinerU 识别文字并持久化缓存，支持自动处理与一键拉取/追新模型。兼容 DeepSeek/Xiaomi MiMo/Kimi/智谱 GLM/通义千问/硅基流动/Ollama 及自定义接口。另附「去除文字空格」「复制信息」与「复制 PDF」等实用工具。",
   "homepage_url": "https://github.com/DrinkTea905/zotero-paper-outline",
   "icons": {

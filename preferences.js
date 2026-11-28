@@ -543,7 +543,11 @@
       if (!picker) return;
       const onSelect = () => {
         const modelElement = byId("paper-outline-model");
-        const selected = String(picker.value || "").trim();
+        const rawValue =
+          picker.selectedItem && picker.selectedItem.value !== undefined
+            ? picker.selectedItem.value
+            : picker.value;
+        const selected = String(rawValue || "").trim();
         if (modelElement) {
           modelElement.value = selected;
         }
@@ -555,8 +559,8 @@
           this.setModelFetchStatus("success", "已恢复自动追新模式（留空将自动选用最新推荐模型）。");
         }
       };
-      picker.addEventListener("change", onSelect);
       picker.addEventListener("command", onSelect);
+      picker.addEventListener("change", onSelect);
     },
 
     setModelFetchStatus(state, message) {
@@ -580,6 +584,10 @@
       const picker = byId("po-model-picker");
       if (picker) {
         clearElementChildren(picker);
+        if ("selectedIndex" in picker || typeof picker.appendItem === "function") {
+          picker.selectedIndex = -1;
+        }
+        picker.value = "";
         picker.hidden = true;
       }
       this.setModelFetchStatus("idle", "");
@@ -671,7 +679,13 @@
             appendPickerOption(picker, label, id);
           });
           const currentModel = String((modelElement && modelElement.value) || "").trim();
-          picker.value = currentModel && models.includes(currentModel) ? currentModel : "";
+          const matchedIndex = currentModel ? models.indexOf(currentModel) : -1;
+          const targetValue = matchedIndex >= 0 ? currentModel : "";
+          const targetIndex = matchedIndex >= 0 ? matchedIndex + 1 : 0;
+          if ("selectedIndex" in picker || typeof picker.appendItem === "function") {
+            picker.selectedIndex = targetIndex;
+          }
+          picker.value = targetValue;
           picker.hidden = false;
         }
 

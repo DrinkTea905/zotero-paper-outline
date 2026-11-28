@@ -3,9 +3,9 @@
     "paper-outline@example.com": {
       "updates": [
         {
-          "version": "1.8.0",
-          "update_link": "https://github.com/DrinkTea905/zotero-paper-outline/releases/download/v1.8.0/paper-outline-gpt.xpi",
-          "update_hash": "sha256:d2ed1efd27f0bb2731641c52c91d05eb281adeab849032889db16700a80905cc",
+          "version": "1.8.1",
+          "update_link": "https://github.com/DrinkTea905/zotero-paper-outline/releases/download/v1.8.1/paper-outline-gpt.xpi",
+          "update_hash": "sha256:fd3d234266c92803f2c99d7bb461a8f458bd7e37236efafde8d4ca2a28ca6dea",
           "applications": {
             "zotero": {
               "strict_min_version": "7.0",

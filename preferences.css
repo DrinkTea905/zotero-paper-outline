@@ -126,7 +126,6 @@
 #paper-outline-api-key,
 #paper-outline-mineru-token,
 #paper-outline-model,
-#po-model-picker,
 #paper-outline-api-url,
 #paper-outline-concurrency,
 #paper-outline-max-chars {
@@ -142,7 +141,6 @@
 #paper-outline-api-key:focus,
 #paper-outline-mineru-token:focus,
 #paper-outline-model:focus,
-#po-model-picker:focus,
 #paper-outline-api-url:focus,
 #paper-outline-concurrency:focus,
 #paper-outline-max-chars:focus,
@@ -582,11 +580,6 @@
   .paper-outline-secret-toggle:hover {
     background: var(--paper-outline-accent-soft);
     border-color: var(--paper-outline-accent);
-  }
-
-  #po-model-picker option {
-    background: #1f2228;
-    color: #e8eaed;
   }
 }
 

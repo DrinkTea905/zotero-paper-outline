@@ -627,6 +627,11 @@ test("设置界面：单一数据源读取 PROVIDERS、拉取并选择模型、�
   assert.equal(picker.hidden, true);
   assert.equal(picker.children.length, 0);
   assert.equal(elements["po-model-fetch-status"].hidden, true);
+
+  // 验证 preferences.xhtml 使用原生 XUL <menulist native="true">（避免 XUL 窗口内 <html:select> 无法展开）
+  const xhtml = fs.readFileSync(path.join(ROOT, "preferences.xhtml"), "utf8");
+  assert.match(xhtml, /<menulist\s+id="po-model-picker"[\s\S]*?native="true"/);
+  assert.doesNotMatch(xhtml, /<html:select\s+id="po-model-picker"/);
 });
 
 test("设置界面：密钥显隐切换、MinerU Token input 实时同步防误报、总结预设切换与恢复、trimReferences 与清缓存联动", async () => {

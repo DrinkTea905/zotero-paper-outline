@@ -65,16 +65,19 @@
                     label="拉取模型"
                     oncommand="window.PaperOutlinePrefsUI.fetchModels()"/>
           </html:div>
-          <html:select id="po-model-picker"
-                       class="paper-outline-model-picker"
-                       hidden="hidden"
-                       aria-label="服务商可用模型列表"></html:select>
           <html:p id="po-model-fetch-status"
                   class="paper-outline-fetch-status"
                   data-state="idle"
                   role="status"
                   aria-live="polite"
                   hidden="hidden"></html:p>
+          <menulist id="po-model-picker"
+                    native="true"
+                    class="paper-outline-model-picker"
+                    hidden="true"
+                    aria-label="服务商可用模型列表">
+            <menupopup/>
+          </menulist>
           <html:p id="paper-outline-model-hint" class="paper-outline-hint">留空 = 自动获取当前服务商最新推荐模型（升级不失效）；也可点击右侧「拉取模型」手动选择。</html:p>
         </html:div>
 
